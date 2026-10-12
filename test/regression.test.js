@@ -424,3 +424,21 @@ test('Tutup buku: wajib export; setelah tutup buku nomor mulai dari 001 pada per
     srv.close();
   }
 });
+
+test('Edit: plan DRAFT dan WO diubah SPV; operator ditolak; plan non-DRAFT tidak bisa diubah langsung', async () => {
+  const c = await call('POST', '/plans', 'spv', planBody('EDIT-1', { target_bale: 10 }));
+  const id = c.data.item.id;
+  const ok = await call('PATCH', `/plans/${id}`, 'spv', { target_bale: 50, batch_sequence: [{ batch_code: 'B-0031', seq: 1 }] });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+  assert.equal(ok.data.item.target_kg, 1750);
+  assert.equal(ok.data.item.batch_sequence[0].batch_code, 'B-0031');
+  assert.equal((await call('PATCH', `/plans/${id}`, 'opdryer', { target_bale: 5 })).status, 403);
+  assert.equal((await call('PATCH', `/plans/${id}`, 'mandor', { target_bale: 5 })).status, 403);
+  const activeId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE' LIMIT 1").get().id;
+  assert.equal((await call('PATCH', `/plans/${activeId}`, 'spv', { target_bale: 5 })).status, 409);
+  const w = await call('POST', '/work-orders', 'spv', { wo_no: 'WO-EDIT-1', buyer: 'Awal', target_ton: 10 });
+  const wu = await call('PATCH', `/work-orders/${w.data.item.id}`, 'admin', { buyer: 'Baru', target_ton: 15 });
+  assert.equal(wu.status, 200, JSON.stringify(wu.data));
+  assert.equal(wu.data.item.target_kg, 15000);
+  assert.equal((await call('PATCH', `/work-orders/${w.data.item.id}`, 'opmd', { buyer: 'X' })).status, 403);
+});
