@@ -286,7 +286,7 @@
     else input = `<input ${attrs.replace(/value="[^"]*"/, '')} ${opts.value !== undefined ? `value="${esc(opts.value)}"` : ''} ${opts.type === 'num' ? 'type="number" step="any"' : ''}>`;
     return `<label>${esc(label)}${input}</label>`;
   }
-  const checks = (name, items, checked = []) => `<div style="display:flex;gap:8px;flex-wrap:wrap">${items.map((i) => `<label style="flex-direction:row;align-items:center;color:#1b2a38"><input type="checkbox" name="${name}" data-type="multi" value="${esc(i)}" ${checked.includes(i) ? 'checked' : ''} style="min-width:0">${esc(i)}</label>`).join('')}</div>`;
+  const checks = (name, items, checked = []) => `<div style="display:flex;gap:8px;flex-wrap:wrap">${items.map((i) => `<label style="flex-direction:row;align-items:center;color:var(--ink-2);text-transform:none;letter-spacing:0;font-size:13px;font-weight:500"><input type="checkbox" name="${name}" data-type="multi" value="${esc(i)}" ${checked.includes(i) ? 'checked' : ''} style="min-width:0">${esc(i)}</label>`).join('')}</div>`;
   const table = (cols, rows) => `<div class="scroll"><table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${cols.length}" class="muted">Belum ada data.</td></tr>`}</tbody></table></div>`;
   const tr = (cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join('')}</tr>`;
   const needPlan = () => (S.planId ? '' : '<div class="msg info">Pilih atau buat Production Plan terlebih dahulu.</div>');
@@ -482,7 +482,7 @@
         <div class="card"><b>Sampling Cake</b>
           <form class="inline" data-form="sample">
             ${field('trolley_code', 'Trolley', { required: true })}${field('p0', 'P0', { type: 'num' })}${field('mv', 'MV', { type: 'num' })}${field('pri', 'PRI', { type: 'num' })}
-            <label style="flex-direction:row;align-items:center;color:#1b2a38"><input type="checkbox" name="ad_hoc" data-type="bool" style="min-width:0"> AD HOC</label>
+            <label style="flex-direction:row;align-items:center;color:var(--ink-2);text-transform:none;letter-spacing:0;font-size:13px;font-weight:500"><input type="checkbox" name="ad_hoc" data-type="bool" style="min-width:0"> AD HOC</label>
             ${field('reason', 'Alasan (wajib jika AD HOC)')}
             <button class="btn" type="submit">Catat sampel</button></form></div>` : ''}
         ${S.cache.lastResult && S.cache.lastResult.url.includes('sampling-compliance') && S.cache.lastResult.url.includes(`/runs/${run.id}/`) ? `<h2>Compliance sampling</h2>${json(S.cache.lastResult.res)}` : ''}
