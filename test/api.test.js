@@ -47,6 +47,20 @@ test('auth: token diterima dari header X-PMS-Token bila Authorization disaring p
   assert.equal(bad.status, 401);
 });
 
+test('auth: token diterima dari cookie HttpOnly pms_session bila header auth tidak terkirim', async () => {
+  const login = await fetch(`${base}/api/auth/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'spv', password: PASSWORD }),
+  });
+  assert.equal(login.status, 200);
+  const setCookie = login.headers.get('set-cookie') || '';
+  assert.match(setCookie, /pms_session=[0-9a-f]{64}/);
+  assert.match(setCookie, /HttpOnly/);
+  const cookie = setCookie.split(';')[0];
+  const me = await fetch(`${base}/api/me`, { headers: { Cookie: cookie } });
+  assert.equal(me.status, 200);
+});
+
 test('login: username tidak peka huruf besar/kecil', async () => {
   const r = await call('POST', '/auth/login', null, { username: ' SPV ', password: PASSWORD });
   assert.equal(r.status, 200, JSON.stringify(r.data));

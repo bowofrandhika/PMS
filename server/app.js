@@ -40,7 +40,14 @@ function createApp(db) {
   api.use((req, res) => res.status(404).json({ error: 'Endpoint tidak ditemukan', code: 'NOT_FOUND' }));
   app.use('/api', api);
 
-  app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', extensions: ['html'] }));
+  // Aset SPA tidak boleh di-cache heuristik oleh browser (penyebab umum 'kode lama' setelah perbaikan).
+  app.use(express.static(path.join(__dirname, '..', 'public'), {
+    index: 'index.html',
+    extensions: ['html'],
+    setHeaders(res, filePath) {
+      if (/\.(html|js|css)$/.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
+    },
+  }));
   app.use((req, res) => res.status(404).type('text/plain').send('Not found'));
 
   // Penanganan error terpusat: pesan jelas dalam Bahasa Indonesia, tidak membocorkan stack.

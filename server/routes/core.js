@@ -6,7 +6,7 @@ const { nowIso, hashPassword, verifyPassword } = require('../db');
 const { PERMISSIONS } = require('../rbac');
 const {
   HttpError, badRequest, notFound, conflict, audit, setting, settingNumber,
-  requireString, requireNumber, requireEnum, loadUserContext, optionalTime,
+  requireString, requireNumber, requireEnum, loadUserContext, optionalTime, sessionCookie, SESSION_COOKIE,
 } = require('../http');
 
 // Definisi resource master generik. Tidak ada endpoint DELETE: data master dinonaktifkan (active=0),
@@ -120,12 +120,14 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     db.prepare('INSERT INTO sessions (token, user_id, created_at, last_seen) VALUES (?, ?, ?, ?)').run(token, user.id, nowIso(), nowIso());
     const ctx = loadUserContext(db, user.id);
     audit(db, ctx, { action: 'LOGIN', entity: 'users', recordId: user.id });
+    res.setHeader('Set-Cookie', sessionCookie(token, 8 * 60 * 60));
     res.json({ token, user: ctx });
   });
 
   r.post('/auth/logout', requireAuth, (req, res) => {
     db.prepare('DELETE FROM sessions WHERE token = ?').run(req.token);
     audit(db, req.user, { action: 'LOGOUT', entity: 'users', recordId: req.user.id });
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
     res.json({ ok: true });
   });
 

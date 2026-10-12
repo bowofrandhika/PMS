@@ -40,6 +40,23 @@ function loadUserContext(db, userId) {
   return { id: user.id, username: user.username, fullName: user.full_name, active: !!user.active, roles, permissions: [...perms] };
 }
 
+const SESSION_COOKIE = 'pms_session';
+
+function readCookie(req, name) {
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0 && part.slice(0, idx).trim() === name) {
+      try { return decodeURIComponent(part.slice(idx + 1).trim()) || null; } catch (e) { return null; }
+    }
+  }
+  return null;
+}
+
+function sessionCookie(token, maxAgeSec) {
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}`;
+}
+
 function createAuth(db) {
   // Middleware: memastikan token valid, tidak timeout, dan memuat konteks user.
   function requireAuth(req, res, next) {
@@ -47,6 +64,8 @@ function createAuth(db) {
     // Token diterima dari Authorization: Bearer, atau header kustom X-PMS-Token (tahan terhadap proxy yang menyaring Authorization).
     let token = header.startsWith('Bearer ') ? header.slice(7) : null;
     if (!token && req.headers['x-pms-token']) token = String(req.headers['x-pms-token']).trim();
+    // Cadangan terakhir: cookie HttpOnly 'pms_session' yang diset saat login.
+    if (!token) token = readCookie(req, SESSION_COOKIE);
     if (!token) return next(new HttpError(401, 'Silakan login terlebih dahulu'));
     const session = db.prepare('SELECT token, user_id, last_seen FROM sessions WHERE token = ?').get(token);
     if (!session) return next(new HttpError(401, 'Sesi tidak valid, silakan login ulang'));
@@ -156,6 +175,6 @@ function newId() {
 
 module.exports = {
   HttpError, badRequest, forbidden, notFound, conflict, unprocessable,
-  createAuth, loadUserContext, hasPerm, hasRole, audit, setting, settingNumber,
+  createAuth, loadUserContext, hasPerm, hasRole, audit, setting, settingNumber, sessionCookie, SESSION_COOKIE,
   requireString, requireNumber, requireEnum, optionalTime, isIsoDateTime, newId,
 };
