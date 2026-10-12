@@ -12,6 +12,13 @@ const {
 
 // Definisi resource master generik. Tidak ada endpoint DELETE: data master dinonaktifkan (active=0),
 // sesuai aturan "No hard delete" (bagian 1.2 dan 9.3).
+// Kode batch lintas proses wajib format B-NNNN (contoh B-0023).
+function batchCode(b) {
+  const code = requireString(b, 'code', { max: 40 }).toUpperCase();
+  if (!/^B-\d{4}$/.test(code)) throw badRequest('Kode batch harus format B-NNNN, contoh B-0023');
+  return code;
+}
+
 const MASTER = {
   equipment: {
     table: 'equipment',
@@ -31,7 +38,9 @@ const MASTER = {
     table: 'batches',
     listOrder: 'code',
     create: (b) => ({
-      code: requireString(b, 'code', { max: 40 }),
+      code: batchCode(b),
+      // Batch dipakai bersama lintas proses (dry sekarang; produksi basah, raw material, finished good menyusul).
+      process: requireEnum(b, 'process', ['DRY_PRODUCTION'], { optional: true }) || 'DRY_PRODUCTION',
       work_order: b.work_order || null,
       product: b.product || null,
       grade: b.grade || null,

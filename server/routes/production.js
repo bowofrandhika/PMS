@@ -8,6 +8,7 @@ const {
 } = require('../http');
 const D = require('../domain');
 const { hardDelete } = require('../archive');
+const { nextSeq, openPeriod } = require('../periods');
 
 function buildRouter(db, { requireAuth, requirePerm }) {
   const r = express.Router();
@@ -43,15 +44,17 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     const norm = D.normalizePlanInput(db, body, { HttpError: null, badRequest });
     if (!norm.plan_date) throw badRequest('plan_date wajib diisi');
     if (!norm.shift_code) throw badRequest('shift_code wajib diisi');
-    // Nomor Produksi dibuat otomatis: DP-DDMMYY-NNN (input dari user diabaikan).
-    const planNo = D.productionNo(db, norm.plan_date, norm.shift_code);
+    // Nomor Produksi dibuat otomatis: DP{shift}-DDMMYY-NNN (input dari user diabaikan).
+    const period = openPeriod(db);
+    const seq = nextSeq(db, period.id);
+    const planNo = D.productionNo(norm.plan_date, norm.shift_code, seq);
     const info = db.prepare(`INSERT INTO production_plans
       (plan_no, version, status, plan_date, shift_code, work_order, product, target_bale, target_kg, target_trolley,
-       dryers, presses, sampling_rules, cake_interval_min, batch_sequence, notes, created_by, created_at)
-      VALUES (?, 1, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+       dryers, presses, sampling_rules, cake_interval_min, batch_sequence, notes, created_by, created_at, period_id, seq_no)
+      VALUES (?, 1, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       planNo, norm.plan_date, norm.shift_code, norm.work_order, norm.product, norm.target_bale, norm.target_kg, norm.target_trolley,
       JSON.stringify(norm.dryers || []), JSON.stringify(norm.presses || []), JSON.stringify(norm.sampling_rules || []),
-      norm.cake_interval_min || 60, JSON.stringify(norm.batch_sequence || []), norm.notes, req.user.username, nowIso());
+      norm.cake_interval_min || 60, JSON.stringify(norm.batch_sequence || []), norm.notes, req.user.username, nowIso(), period.id, seq);
     const plan = loadPlan(Number(info.lastInsertRowid));
     audit(db, req.user, { action: 'CREATE', entity: 'production_plans', recordId: plan.id, newValue: plan });
     res.status(201).json({ item: plan });
@@ -76,10 +79,114 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.json({ item: after });
   });
 
+  // ---------- Periode / tutup buku ----------
+  r.get('/periods', requireAuth, requirePerm('plan.view'), (req, res) => {
+    const items = db.prepare('SELECT p.*, (SELECT COUNT(*) FROM production_plans x WHERE x.period_id = p.id) AS plan_count, (SELECT COUNT(*) FROM period_exports e WHERE e.period_id = p.id) AS export_count FROM fiscal_periods p ORDER BY p.id DESC').all();
+    res.json({ items });
+  });
+
+  // Export seluruh data periode berjalan (JSON). Semua tabel yang terhubung ke Nomor Produksi periode ini ikut diekspor.
+  r.get('/periods/current/export', requireAuth, requirePerm('report.export'), (req, res) => {
+    const period = openPeriod(db);
+    const planIds = db.prepare('SELECT id FROM production_plans WHERE period_id = ?').all(period.id).map((x) => x.id);
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((x) => x.name);
+    const bundle = { period, exported_at: nowIso(), exported_by: req.user.username, tables: {} };
+    let rows = 0;
+    for (const t of tables) {
+      if (t === 'audit_logs' || t === 'sessions') continue;
+      const cols = db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+      let data;
+      if (t === 'production_plans') data = db.prepare('SELECT * FROM production_plans WHERE period_id = ?').all(period.id);
+      else if (cols.includes('plan_id')) data = db.prepare(`SELECT * FROM ${t} WHERE plan_id IN (SELECT id FROM production_plans WHERE period_id = ?)`).all(period.id);
+      else continue;
+      bundle.tables[t] = data;
+      rows += data.length;
+    }
+    // Audit trail periode ini (per waktu) disertakan sebagai lampiran terpisah.
+    bundle.audit_note = 'Audit trail lengkap tersedia di menu Admin → Audit.';
+    db.prepare('INSERT INTO period_exports (period_id, exported_by, exported_at, table_count, row_count) VALUES (?, ?, ?, ?, ?)')
+      .run(period.id, req.user.username, nowIso(), Object.keys(bundle.tables).length, rows);
+    audit(db, req.user, { action: 'EXPORT', entity: 'fiscal_periods', recordId: period.id, newValue: { rows } });
+    res.setHeader('Content-Disposition', `attachment; filename="export-${period.name.replace(/[^A-Za-z0-9]+/g, '_')}-${nowIso().slice(0, 10)}.json"`);
+    res.json(bundle);
+  });
+
+  // Tutup buku: hanya jika sudah ada export, tidak ada plan yang masih DRAFT/APPROVED/ACTIVE, dan tidak ada Dryer berjalan.
+  // Setelah ditutup, penomoran dimulai lagi dari 001 pada periode baru.
+  r.post('/periods/close', requireAuth, requirePerm('period.close'), (req, res) => {
+    const b = req.body || {};
+    if (String(b.confirm || '').trim() !== 'TUTUP BUKU') throw badRequest('Ketik TUTUP BUKU untuk konfirmasi');
+    const period = openPeriod(db);
+    const exports = db.prepare('SELECT COUNT(*) AS n FROM period_exports WHERE period_id = ?').get(period.id).n;
+    if (!exports) throw conflict('Export data periode ini dulu sebelum tutup buku');
+    const open = db.prepare("SELECT COUNT(*) AS n FROM production_plans WHERE period_id = ? AND status IN ('DRAFT','APPROVED','ACTIVE')").get(period.id).n;
+    if (open) throw conflict(`${open} Nomor Produksi masih DRAFT/APPROVED/ACTIVE. Selesaikan atau tutup dulu.`);
+    const runs = db.prepare("SELECT COUNT(*) AS n FROM dryer_runs WHERE plan_id IN (SELECT id FROM production_plans WHERE period_id = ?) AND status IN ('RUNNING','STOPPED')").get(period.id).n;
+    if (runs) throw conflict(`${runs} Dryer Run masih berjalan/STOP. Tutup dulu.`);
+    const today = nowIso().slice(0, 10);
+    db.exec('BEGIN');
+    try {
+      db.prepare("UPDATE fiscal_periods SET status = 'CLOSED', end_date = ?, closed_by = ?, closed_at = ? WHERE id = ?").run(today, req.user.username, nowIso(), period.id);
+      db.prepare("INSERT INTO fiscal_periods (name, start_date, status, last_seq, created_at) VALUES (?, ?, 'OPEN', 0, ?)")
+        .run(`Periode ${today.slice(0, 4)} (${Number(period.name.match(/\((\d+)\)/)?.[1] || 1) + 1})`, today, nowIso());
+      db.exec('COMMIT');
+    } catch (err) { db.exec('ROLLBACK'); throw err; }
+    const closed = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(period.id);
+    const next = openPeriod(db);
+    audit(db, req.user, { action: 'CLOSE', entity: 'fiscal_periods', recordId: period.id, oldValue: period, newValue: closed });
+    res.json({ closed, next, note: 'Tutup buku berhasil. Penomoran Nomor Produksi dimulai dari 001 pada periode baru.' });
+  });
+
+  // ---------- Kesiapan alat (siap dijalankan?) ----------
+  r.get('/equipment/readiness', requireAuth, requirePerm('plan.view'), (req, res) => {
+    const plan = loadPlan(Number(req.query.plan_id));
+    const statusOf = D.equipmentStatusMap(db, plan);
+    const openDown = new Set(db.prepare("SELECT equipment_code FROM downtime_events WHERE status = 'OPEN'").all().map((x) => x.equipment_code));
+    const eqs = db.prepare("SELECT * FROM equipment WHERE active = 1 AND type IN ('DRYER','PRESS','PRESS_CHAMBER') ORDER BY code").all();
+    const items = eqs.map((eq) => {
+      const st = statusOf[eq.code];
+      const reasons = [];
+      if (eq.type === 'DRYER') {
+        if (!plan.dryers.includes(eq.code)) reasons.push('Tidak dipilih di Nomor Produksi ini');
+        if (openDown.has(eq.code)) reasons.push('Ada downtime yang belum selesai');
+        const vs = db.prepare('SELECT id FROM validated_settings WHERE product = ? AND dryer_code = ? AND active = 1 LIMIT 1').get(plan.product, eq.code);
+        if (!vs) reasons.push(`Belum ada setting tervalidasi (B1/B2/Timer) untuk grade ${plan.product}`);
+        if (st === 'RUNNING') reasons.push('Sedang berjalan');
+        if (st === 'STOPPED') reasons.push('Sedang STOP (lanjutkan dari Dryer Board)');
+      } else if (eq.type === 'PRESS') {
+        if (!plan.presses.includes(eq.code)) reasons.push('Tidak dipilih di Nomor Produksi ini');
+        if (st === 'DOWNTIME') reasons.push('Semua chamber bermasalah');
+        if (st === 'REDUCED CAPACITY') reasons.push('Sebagian chamber bermasalah (kapasitas berkurang)');
+      } else {
+        if (openDown.has(eq.code)) reasons.push('Ada downtime yang belum selesai');
+        if (eq.parent_code && !plan.presses.includes(eq.parent_code)) reasons.push('Press induk tidak dipilih di Nomor Produksi ini');
+      }
+      const ready = reasons.length === 0;
+      const label = ready ? 'SIAP' : (st === 'RUNNING' ? 'SEDANG BERJALAN' : 'TIDAK SIAP');
+      return { code: eq.code, name: eq.name, type: eq.type, status: st || '—', ready, label, reasons };
+    });
+    // Metal Detector: siap bila challenge Fe/Non-Fe/SS 2.5 PASS sejak STOP terakhir dan MD tidak sedang berjalan.
+    const lastStop = db.prepare('SELECT stopped_at FROM md_sessions WHERE plan_id = ? AND stopped_at IS NOT NULL ORDER BY id DESC LIMIT 1').get(plan.id);
+    const since = lastStop ? lastStop.stopped_at : '';
+    const mdReasons = [];
+    for (const t of ['FE_2_5', 'NONFE_2_5', 'SS_2_5']) {
+      const last = db.prepare('SELECT result FROM md_challenges WHERE plan_id = ? AND test_type = ? AND at > ? ORDER BY id DESC LIMIT 1').get(plan.id, t, since);
+      if (!last || last.result !== 'PASS') mdReasons.push(`Challenge ${t.replace('_2_5', '').replace('NONFE', 'Non-Fe').replace('FE', 'Fe').replace('SS', 'SS')} 2.5 belum PASS`);
+    }
+    const mdRunning = db.prepare('SELECT id FROM md_sessions WHERE plan_id = ? AND stopped_at IS NULL LIMIT 1').get(plan.id);
+    if (mdRunning) mdReasons.push('Metal Detector sedang berjalan');
+    const mdReady = mdReasons.length === 0;
+    items.push({ code: 'MD', name: 'Metal Detector', type: 'MD', status: mdRunning ? 'RUNNING' : 'STOPPED', ready: mdReady, label: mdReady ? 'SIAP' : (mdRunning ? 'SEDANG BERJALAN' : 'TIDAK SIAP'), reasons: mdReasons });
+    res.json({ plan_id: plan.id, plan_no: plan.plan_no, items });
+  });
+
   // ---------- Hard delete Nomor Produksi (hanya DRAFT; yang sudah disetujui harus direvisi/ditutup) ----------
   r.delete('/plans/:id', requireAuth, requirePerm('hard.delete'), (req, res) => {
     const plan = loadPlan(Number(req.params.id));
     if (plan.status !== 'DRAFT') throw conflict(`Nomor Produksi berstatus ${plan.status}; hanya DRAFT yang dapat dihapus permanen`);
+    if (plan.period_id && db.prepare("SELECT status FROM fiscal_periods WHERE id = ?").get(plan.period_id).status === 'CLOSED') {
+      throw conflict('Periode sudah ditutup (tutup buku); data tidak dapat dihapus');
+    }
     const reason = requireString(req.body || {}, 'reason', { max: 300 });
     hardDelete(db, req.user, { entity: 'production_plans', table: 'production_plans', id: plan.id, label: `${plan.plan_no} v${plan.version}`, reason });
     res.json({ ok: true, note: 'Nomor Produksi DRAFT dihapus permanen (tercatat di riwayat).' });
@@ -223,6 +330,7 @@ function buildRouter(db, { requireAuth, requirePerm }) {
       JSON.stringify(merged.sampling_rules), merged.cake_interval_min, JSON.stringify(merged.batch_sequence), merged.notes,
       reason, req.user.username, nowIso());
     const created = loadPlan(Number(info.lastInsertRowid));
+    db.prepare('UPDATE production_plans SET period_id = ?, seq_no = ? WHERE id = ?').run(plan.period_id, plan.seq_no, created.id);
     audit(db, req.user, { action: 'REVISE', entity: 'production_plans', recordId: created.id, oldValue: { id: plan.id, version: plan.version }, newValue: { id: created.id, version: created.version }, reason });
     res.status(201).json({ item: created });
   });

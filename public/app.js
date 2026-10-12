@@ -168,6 +168,19 @@
       S.token = null; S.me = null; S.plans = []; store.del(); render();
     },
     tab(el) { S.tab = el.dataset.id; render(); },
+    exportPeriod(el) {
+      return ACT.run(el, async () => {
+        const res = await fetch('/api/periods/current/export', { headers: { Authorization: 'Bearer ' + S.token, 'X-PMS-Token': S.token } });
+        if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || 'Export gagal'); }
+        const blob = await res.blob();
+        const cd = res.headers.get('content-disposition') || '';
+        const name = (cd.match(/filename="([^"]+)"/) || [])[1] || 'export.json';
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        return 'Export dibuat dan diunduh. Tutup buku bisa dilakukan setelah data dicek.';
+      });
+    },
     setPlan(el) { S.planId = el.value ? Number(el.value) : null; S.runId = null; S.shiftId = null; S.palletId = null; render(); },
     select(el) {
       const k = el.dataset.key;
@@ -386,10 +399,15 @@
     });
     let equip = '';
     if (S.planId) {
-      const es = await api('GET', `/equipment/status?plan_id=${S.planId}`);
-      const relevant = es.items.filter((x) => ['DRYER', 'PRESS', 'PRESS_CHAMBER'].includes(x.type));
-      equip = `<p class="muted" style="font-size:12px">Isi: kondisi Dryer, Press, dan chamber Press yang dipilih di Nomor Produksi ini. Dihitung otomatis dari pilihan Dryer/Press di plan, status run Dryer, dan downtime yang masih terbuka. Hanya dibaca.</p>
-        <p class="muted" style="font-size:12px"><b>NOT PLANNED</b> = tidak dipilih di plan · <b>PLANNED ACTIVE</b> = dipilih, belum berjalan · <b>RUNNING / STOPPED</b> = status run Dryer · <b>DOWNTIME</b> = downtime masih terbuka · <b>REDUCED CAPACITY</b> = sebagian chamber Press bermasalah.</p>` + table(['Kode', 'Nama', 'Tipe', 'Status'], relevant.map((x) => tr([esc(x.code), esc(x.name), esc(x.type), `<span class="badge ${statusCls(x.status || '')}">${esc(x.status || 'PLANNED')}</span>`])));
+      const rd = await api('GET', `/equipment/readiness?plan_id=${S.planId}`);
+      equip = `<p class="muted" style="font-size:12px"><b>SIAP</b> = boleh dijalankan sekarang. <b>TIDAK SIAP</b> = ada alasan di kolom sebelahnya yang harus diselesaikan dulu. Hanya dibaca; status berubah otomatis dari plan, run Dryer, MD, dan downtime.</p>`
+        + table(['Kode', 'Nama', 'Tipe', 'Status sekarang', 'Kesiapan', 'Alasan'], rd.items.map((x) => tr([
+          esc(x.code), esc(x.name), esc(x.type),
+          `<span class="badge ${statusCls(x.status)}">${esc(x.status)}</span>`,
+          `<span class="badge ${x.ready ? 'ok' : 'warn'}">${esc(x.label)}</span>`,
+          x.reasons.length ? esc(x.reasons.join('; ')) : '<span class="muted">—</span>',
+        ])))
+        + `<p class="muted" style="font-size:12px"><b>Cara cek:</b> Dryer siap bila dipilih di plan, tidak ada downtime terbuka, ada setting tervalidasi (B1/B2/Timer) untuk grade plan, dan belum berjalan. Press siap bila dipilih dan masih ada chamber yang berfungsi. MD siap bila challenge Fe, Non-Fe, dan SS 2.5 sudah PASS sejak STOP terakhir.</p>`;
     }
     return `
       <h1>Nomor Produksi</h1>
@@ -419,7 +437,7 @@
         <button class="btn" type="submit">Simpan DRAFT</button>
       </form>
 ` : ''}
-      <h2>Status equipment (Nomor Produksi terpilih)</h2>
+      <h2>Kesiapan alat (Nomor Produksi terpilih)</h2>
       ${equip || '<p class="muted">Pilih plan.</p>'}`;
   }
 
@@ -768,6 +786,17 @@
     if (has('rbac.manage')) {
       const st = (await api('GET', '/settings')).items;
       parts.push(`<h2>Setting sistem</h2>${table(['Kunci', 'Nilai', 'Ubah'], st.map((s) => tr([esc(s.key), esc(s.value), `<form class="inline" data-form="settingSet" data-key="${esc(s.key)}"><input name="value" value="${esc(s.value)}" data-type="str" style="min-width:90px"><button class="btn sec" type="submit">Simpan</button></form>`])))}`);
+    }
+    if (has('report.export') || has('period.close')) {
+      const periods = (await api('GET', '/periods')).items;
+      const cur = periods.find((p) => p.status === 'OPEN');
+      parts.push(`<h2>Periode & tutup buku</h2>
+        <p class="muted" style="font-size:12px">Nomor Produksi berlanjut terus dalam satu periode (contoh DP1-121026-057). Urutan: (1) export data periode berjalan, (2) tutup buku. Syarat tutup buku: sudah ada export, tidak ada Nomor Produksi DRAFT/APPROVED/ACTIVE, dan tidak ada Dryer yang berjalan. Setelah ditutup, nomor baru mulai dari 001 pada periode baru. Periode lama tetap tersimpan dan hanya bisa dibaca.</p>
+        ${table(['Periode', 'Mulai', 'Selesai', 'Status', 'Nomor terakhir', 'Jml Nomor Produksi', 'Jml export'], periods.map((p) => tr([esc(p.name), esc(p.start_date), esc(p.end_date || '—'), `<span class="badge ${statusCls(p.status)}">${esc(p.status)}</span>`, fmt(p.last_seq), fmt(p.plan_count), fmt(p.export_count)])))}
+        <div class="card">
+          ${has('report.export') ? '<button class="btn sec" data-act="exportPeriod">Export periode berjalan (JSON)</button> ' : ''}
+          ${has('period.close') && cur ? `<button class="btn bad" data-api="POST|/periods/close" data-field="confirm" data-prompt="Ketik TUTUP BUKU untuk konfirmasi:" data-confirm="Tutup buku ${esc(cur.name)}? Nomor akan mulai dari 001 pada periode baru." data-ok="Tutup buku berhasil. Periode baru dimulai.">Tutup buku</button>` : ''}
+        </div>`);
     }
     if (has('audit.view')) {
       const dr = (await api('GET', '/deleted-records')).items;

@@ -246,18 +246,18 @@ test('B-09 migrasi: database lama (kolom ok_count) dibuka dan kolom diganti slot
   }
 });
 
-test('Nomor Produksi: format DP-DDMMYY-NNN, nomor urut per tanggal, input plan_no diabaikan', async () => {
+test('Nomor Produksi: format DPS-DDMMYY-NNN, nomor urut berlanjut lintas tanggal dan shift, input plan_no diabaikan', async () => {
   const a = await call('POST', '/plans', 'spv', planBody('IGNORED-1', { plan_date: '2026-10-12', target_bale: 10 }));
   assert.equal(a.status, 201, JSON.stringify(a.data));
   assert.match(a.data.item.plan_no, /^DP1-121026-\d{3}$/);
-  const b = await call('POST', '/plans', 'spv', planBody('IGNORED-2', { plan_date: '2026-10-12', target_bale: 10 }));
+  const b = await call('POST', '/plans', 'spv', planBody('IGNORED-2', { plan_date: '2026-10-12', shift_code: '2', target_bale: 10 }));
   assert.equal(b.status, 201);
+  assert.match(b.data.item.plan_no, /^DP2-121026-\d{3}$/);
+  const c = await call('POST', '/plans', 'spv', planBody('IGNORED-3', { plan_date: '2026-10-13', target_bale: 10 }));
+  assert.match(c.data.item.plan_no, /^DP1-131026-\d{3}$/);
   const na = Number(a.data.item.plan_no.slice(-3));
   assert.equal(Number(b.data.item.plan_no.slice(-3)), na + 1);
-  assert.ok(b.data.item.plan_no.startsWith('DP1-121026-'));
-  const c = await call('POST', '/plans', 'spv', planBody('IGNORED-3', { plan_date: '2026-10-13', target_bale: 10 }));
-  assert.ok(c.data.item.plan_no.startsWith('DP1-131026-'));
-  assert.equal(c.data.item.plan_no.slice(-3), '001');
+  assert.equal(Number(c.data.item.plan_no.slice(-3)), na + 2);
 });
 
 test('Target Bale dan kg saling mengisi (1 Bale = 35 kg); yang diisi duluan yang dipakai', async () => {
@@ -306,11 +306,12 @@ test('Work Order: dibuat oleh SPV, nomor unik, WO nonaktif tidak bisa dipakai pl
   assert.equal(upd.data.item.target_kg, 20000);
 });
 
-test('Nomor Produksi: shift 2 melanjutkan nomor urut tanggal yang sama (tidak per shift)', async () => {
+test('Nomor Produksi: shift 2 melanjutkan nomor urut yang sama (tidak per shift)', async () => {
   const a = await call('POST', '/plans', 'spv', planBody('S-1', { plan_date: '2026-10-20', shift_code: '1', target_bale: 10 }));
   const b = await call('POST', '/plans', 'spv', planBody('S-2', { plan_date: '2026-10-20', shift_code: '2', target_bale: 10 }));
-  assert.equal(a.data.item.plan_no, 'DP1-201026-001');
-  assert.equal(b.data.item.plan_no, 'DP2-201026-002');
+  const na = Number(a.data.item.plan_no.slice(-3));
+  assert.equal(a.data.item.plan_no.slice(0, 4), 'DP1-');
+  assert.equal(b.data.item.plan_no, `DP2-201026-${String(na + 1).padStart(3, '0')}`);
 });
 
 test('Hard delete: DRAFT dihapus permanen, isi tersimpan di riwayat; plan non-DRAFT ditolak', async () => {
@@ -357,4 +358,69 @@ test('Kode batch B-NNNN: B-0023 dan B-0024 diterima dan dibuat di master batch o
   assert.equal(p.status, 201, JSON.stringify(p.data));
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM batches WHERE code IN ('B-0023','B-0024')").get().n, 2);
   assert.equal((await call('POST', '/plans', 'spv', planBody('BATCH-X', { batch_sequence: [{ batch_code: 'B-23', seq: 1 }] }))).status, 400);
+});
+
+test('Kesiapan alat: Dryer tidak dipilih di plan = TIDAK SIAP dengan alasan; MD butuh challenge PASS', async () => {
+  const planId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE' LIMIT 1").get().id;
+  const r = await call('GET', `/equipment/readiness?plan_id=${planId}`, 'opdryer');
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const dryB = r.data.items.find((x) => x.code === 'DRY-B');
+  assert.equal(dryB.ready, false);
+  assert.ok(dryB.reasons.some((x) => x.includes('Tidak dipilih')));
+  const md = r.data.items.find((x) => x.code === 'MD');
+  assert.ok(md, 'MD harus ada');
+  assert.equal(typeof md.ready, 'boolean');
+  assert.ok(r.data.items.every((x) => ['DRYER', 'PRESS', 'PRESS_CHAMBER', 'MD'].includes(x.type)));
+});
+
+test('Master batch: kode B-NNNN dan proses DRY_PRODUCTION; format lain ditolak', async () => {
+  const ok = await call('POST', '/master/batches', 'admin', { code: 'B-0099', process: 'DRY_PRODUCTION' });
+  assert.equal(ok.status, 201, JSON.stringify(ok.data));
+  assert.equal(ok.data.item.process, 'DRY_PRODUCTION');
+  assert.equal((await call('POST', '/master/batches', 'admin', { code: 'B-99' })).status, 400);
+  assert.equal((await call('POST', '/master/batches', 'admin', { code: 'B-0100', process: 'WET_PRODUCTION' })).status, 400);
+});
+
+test('Tutup buku: wajib export; setelah tutup buku nomor mulai dari 001 pada periode baru', async () => {
+  const { openDatabase: open2 } = require('../server/db');
+  const { createApp: app2fn } = require('../server/app');
+  const db2 = open2(':memory:');
+  const srv = app2fn(db2).listen(0, '127.0.0.1');
+  await new Promise((r) => srv.once('listening', r));
+  const base2 = `http://127.0.0.1:${srv.address().port}/api`;
+  const req = async (method, path, user, body) => {
+    const headers = {};
+    if (user) headers.Authorization = `Bearer ${tokens2[user]}`;
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    const res = await fetch(base2 + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  const tokens2 = {};
+  for (const u of ['admin', 'spv', 'spv2']) tokens2[u] = (await req('POST', '/auth/login', null, { username: u, password: PASSWORD })).data.token;
+  try {
+    const a = await req('POST', '/plans', 'spv', planBody('X', { plan_date: '2026-10-12', target_bale: 10 }));
+    assert.equal(a.status, 201, JSON.stringify(a.data));
+    assert.equal(a.data.item.plan_no, 'DP1-121026-001');
+    // Tutup buku tanpa export ditolak.
+    const noExport = await req('POST', '/periods/close', 'admin', { confirm: 'TUTUP BUKU' });
+    assert.equal(noExport.status, 409);
+    // Plan DRAFT masih ada: tutup buku ditolak meski sudah export.
+    assert.equal((await req('GET', '/periods/current/export', 'admin')).status, 200);
+    const draftBlock = await req('POST', '/periods/close', 'admin', { confirm: 'TUTUP BUKU' });
+    assert.equal(draftBlock.status, 409);
+    // Hapus DRAFT (hard delete), lalu tutup buku.
+    assert.equal((await req('DELETE', `/plans/${a.data.item.id}`, 'spv', { reason: 'uji tutup buku' })).status, 200);
+    const wrongText = await req('POST', '/periods/close', 'admin', { confirm: 'ya' });
+    assert.equal(wrongText.status, 400);
+    const closed = await req('POST', '/periods/close', 'admin', { confirm: 'TUTUP BUKU' });
+    assert.equal(closed.status, 200, JSON.stringify(closed.data));
+    // Nomor baru mulai dari 001 pada periode baru, dan tidak pernah dipakai ulang di periode lama.
+    const b = await req('POST', '/plans', 'spv', planBody('Y', { plan_date: '2026-12-31', target_bale: 10 }));
+    assert.equal(b.data.item.plan_no, 'DP1-311226-001');
+    const periods = (await req('GET', '/periods', 'admin')).data.items;
+    assert.equal(periods.length, 2);
+    assert.equal(periods.find((p) => p.status === 'CLOSED').export_count, 1);
+  } finally {
+    srv.close();
+  }
 });

@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS trolleys (
 CREATE TABLE IF NOT EXISTS batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   code TEXT NOT NULL UNIQUE,
+  process TEXT NOT NULL DEFAULT 'DRY_PRODUCTION', -- proses: DRY_PRODUCTION (sekarang); produksi basah/raw material/finished good menyusul
   work_order TEXT,
   product TEXT,
   grade TEXT,
@@ -146,6 +147,28 @@ CREATE TABLE IF NOT EXISTS consumable_prices (
   created_at TEXT NOT NULL
 );
 
+-- ===== Periode / tutup buku (nomor Nomor Produksi berlanjut dalam satu periode) =====
+CREATE TABLE IF NOT EXISTS fiscal_periods (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  end_date TEXT,
+  status TEXT NOT NULL DEFAULT 'OPEN',   -- OPEN | CLOSED
+  last_seq INTEGER NOT NULL DEFAULT 0,   -- penomoran tidak pernah dipakai ulang dalam periode
+  closed_by TEXT,
+  closed_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS period_exports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  period_id INTEGER NOT NULL REFERENCES fiscal_periods(id),
+  exported_by TEXT,
+  exported_at TEXT NOT NULL,
+  table_count INTEGER,
+  row_count INTEGER
+);
+
 -- ===== Riwayat hard delete (arsip; tidak pernah dihapus) =====
 CREATE TABLE IF NOT EXISTS deleted_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +204,8 @@ CREATE TABLE IF NOT EXISTS production_plans (
   version INTEGER NOT NULL DEFAULT 1,
   supersedes_id INTEGER REFERENCES production_plans(id),
   status TEXT NOT NULL DEFAULT 'DRAFT',  -- DRAFT | APPROVED | ACTIVE | CLOSED | SUPERSEDED
+  period_id INTEGER REFERENCES fiscal_periods(id),
+  seq_no INTEGER,                        -- nomor urut dalam periode (NNN pada DPS-DDMMYY-NNN)
   plan_date TEXT NOT NULL,
   shift_code TEXT NOT NULL,
   work_order TEXT,
@@ -654,6 +679,25 @@ function seedSettings(db) {
 // Migrasi ringan untuk database yang dibuat sebelum perubahan skema.
 // ok_count -> slot_count: kolom ini menghitung Bale yang mengisi slot pallet (OK + Hold), bukan OK saja.
 function migrate(db) {
+  const colsOf = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+  if (!colsOf('production_plans').includes('period_id')) db.exec('ALTER TABLE production_plans ADD COLUMN period_id INTEGER REFERENCES fiscal_periods(id)');
+  if (!colsOf('production_plans').includes('seq_no')) db.exec('ALTER TABLE production_plans ADD COLUMN seq_no INTEGER');
+  if (!colsOf('batches').includes('process')) db.exec("ALTER TABLE batches ADD COLUMN process TEXT NOT NULL DEFAULT 'DRY_PRODUCTION'");
+  // Periode aktif wajib ada; Nomor Produksi lama dimasukkan ke periode ini dengan urutan sesuai dibuat.
+  let open = db.prepare("SELECT * FROM fiscal_periods WHERE status = 'OPEN' ORDER BY id DESC LIMIT 1").get();
+  if (!open) {
+    const today = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 10);
+    const info = db.prepare("INSERT INTO fiscal_periods (name, start_date, status, last_seq, created_at) VALUES (?, ?, 'OPEN', 0, ?)")
+      .run(`Periode ${today.slice(0, 4)} (1)`, today, new Date().toISOString());
+    open = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(Number(info.lastInsertRowid));
+  }
+  const orphan = db.prepare('SELECT id FROM production_plans WHERE period_id IS NULL ORDER BY id').all();
+  if (orphan.length) {
+    let seq = db.prepare('SELECT COALESCE(MAX(seq_no), 0) AS m FROM production_plans WHERE period_id = ?').get(open.id).m;
+    const upd = db.prepare('UPDATE production_plans SET period_id = ?, seq_no = ? WHERE id = ?');
+    for (const p of orphan) { seq += 1; upd.run(open.id, seq, p.id); }
+    db.prepare('UPDATE fiscal_periods SET last_seq = ? WHERE id = ?').run(seq, open.id);
+  }
   const cols = db.prepare('PRAGMA table_info(pallets)').all().map((c) => c.name);
   if (cols.includes('ok_count') && !cols.includes('slot_count')) {
     db.exec('ALTER TABLE pallets RENAME COLUMN ok_count TO slot_count');
