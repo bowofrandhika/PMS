@@ -1,4 +1,4 @@
-/* PMS Produksi Kering – SPA ringan (vanilla JS). Semua data diambil dari /api. */
+/* Production Management System – SPA ringan (vanilla JS). Semua data diambil dari /api. */
 (function () {
   'use strict';
 
@@ -102,7 +102,7 @@
     return `
       <header class="top">
         <img class="logo" src="/logo.svg" alt="PT Potensi Bumi Sakti">
-        <div><div style="font-weight:700;color:#0f3d66">PMS Produksi Kering</div><div class="muted" style="font-size:12px">Kebutuhan Developer Aplikasi Produksi Kering · Rev 2.0</div></div>
+        <div><div style="font-weight:700;color:#0f3d66">Production Management System</div><div class="muted" style="font-size:12px">Kebutuhan Developer Aplikasi Produksi Kering · Rev 2.0</div></div>
         <div class="grow"></div>
         <label>Production Plan aktif
           <select data-act="setPlan">${S.plans.length ? planOpts : '<option value="">(belum ada plan)</option>'}</select>
@@ -117,7 +117,7 @@
   function loginView() {
     return `<div class="login">
       <img src="/logo.svg" alt="PT Potensi Bumi Sakti">
-      <h1 style="font-size:16px">PMS Produksi Kering</h1>
+      <h1 style="font-size:16px">Production Management System</h1>
       <form data-form="login">
         <label>Username<input name="username" autocomplete="username" required></label>
         <label>Password<input name="password" type="password" autocomplete="current-password" required></label>

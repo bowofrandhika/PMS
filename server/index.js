@@ -12,7 +12,7 @@ const db = openDatabase(DB_FILE);
 const app = createApp(db);
 
 const server = app.listen(PORT, HOST, () => {
-  console.log(`PMS Produksi Kering berjalan di http://${HOST}:${PORT} (db: ${DB_FILE})`);
+  console.log(`Production Management System berjalan di http://${HOST}:${PORT} (db: ${DB_FILE})`);
 });
 
 function shutdown() {

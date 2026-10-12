@@ -1,4 +1,4 @@
-# PMS Produksi Kering — PT Potensi Bumi Sakti
+# Production Management System — PT Potensi Bumi Sakti (Produksi Kering)
 
 Aplikasi web untuk proses utama produksi kering: **Production Plan → Shift Mandor → Dryer Board (23 kompartemen) → Metal Detector → Pallet → Handover**, dengan audit trail, RBAC, laporan, dan KPI pilot.
 

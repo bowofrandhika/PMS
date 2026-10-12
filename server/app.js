@@ -17,7 +17,17 @@ function createApp(db) {
   app.use(express.json({ limit: '1mb' }));
 
   const api = express.Router();
-  api.get('/health', (req, res) => res.json({ ok: true, app: 'PMS Produksi Kering', tz: 'Asia/Jakarta' }));
+  // Log ringkas setiap request /api (metode, path, status, durasi, ada-tidaknya header auth).
+  // Nilai token/password TIDAK pernah dicatat. Dipakai untuk diagnosis login dari sisi server.
+  api.use((req, res, next) => {
+    const started = Date.now();
+    res.on('finish', () => {
+      const hasAuth = Boolean(req.headers.authorization || req.headers['x-pms-token']);
+      console.log(`[api] ${new Date().toISOString()} ${req.method} ${req.originalUrl.split('?')[0]} ${res.statusCode} ${Date.now() - started}ms auth=${hasAuth ? 'yes' : 'no'}`);
+    });
+    next();
+  });
+  api.get('/health', (req, res) => res.json({ ok: true, app: 'Production Management System', tz: 'Asia/Jakarta' }));
   api.use(core.buildRouter(db, { requireAuth, requirePerm }));
 
   const prod = production.buildRouter(db, { requireAuth, requirePerm });

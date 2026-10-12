@@ -1,4 +1,4 @@
-# Asumsi, Open Items, dan Gap — PMS Produksi Kering
+# Asumsi, Open Items, dan Gap — Production Management System (PMS Produksi Kering)
 
 Sumber: "Kebutuhan Developer Aplikasi Produksi Kering" (Versi 1, Draft untuk requirement confirmation, 12 Oktober 2026; revisi 2.0). Dokumen ini mencatat setiap keputusan yang diambil **sebelum** requirement lock ditandatangani Process Owner. Setiap asumsi harus dikonfirmasi; open item tidak boleh menjadi asumsi permanen, sehingga dibuat *configurable* atau *inactive*.
 

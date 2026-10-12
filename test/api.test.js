@@ -324,7 +324,7 @@ test('Klasifikasi moisture cangkang sesuai dokumen 11.4', () => {
 test('Halaman statis & logo tersedia; endpoint tidak dikenal memberi JSON 404', async () => {
   const idx = await fetch(base + '/');
   assert.equal(idx.status, 200);
-  assert.match(await idx.text(), /PMS Produksi Kering/);
+  assert.match(await idx.text(), /Production Management System/);
   const logo = await fetch(base + '/logo.svg');
   assert.equal(logo.status, 200);
   const nf = await call('GET', '/tidak-ada', null);
