@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96" role="img" aria-label="PT Potensi Bumi Sakti">
+  <!-- Logo sementara (dibuat ulang sebagai pengganti). Ganti dengan public/logo.svg dari "LOGO - PBS.png". -->
+  <g transform="translate(4,6)">
+    <path d="M44 4 C60 18 66 40 56 62 C50 74 38 82 24 84 C32 66 34 48 28 30 C36 34 40 22 44 4 Z" fill="#1d5fa7"/>
+    <path d="M44 4 C30 20 22 38 24 84" fill="none" stroke="#ffffff" stroke-width="2" opacity=".7"/>
+    <path d="M10 46 C22 40 32 44 36 56 C24 60 14 56 10 46 Z" fill="#2e8b57"/>
+    <path d="M70 40 C60 36 52 42 50 52 C62 56 70 52 70 40 Z" fill="#7bc67e"/>
+    <path d="M34 80 C40 66 50 60 62 62 C58 74 46 82 34 80 Z" fill="#0f4d2e"/>
+  </g>
+  <text x="100" y="42" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#0f3d66">PT POTENSI</text>
+  <text x="100" y="66" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#2e8b57">BUMI SAKTI</text>
+</svg>
