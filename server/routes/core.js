@@ -94,9 +94,10 @@ function buildRouter(db, { requireAuth, requirePerm }) {
 
   // ---------- Auth ----------
   r.post('/auth/login', (req, res) => {
-    const username = requireString(req.body || {}, 'username', { max: 60 });
+    const username = requireString(req.body || {}, 'username', { max: 60 }).trim();
     const password = requireString(req.body || {}, 'password', { max: 200 });
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    // Username tidak peka huruf besar/kecil (Admin = admin).
+    const user = db.prepare('SELECT * FROM users WHERE lower(username) = lower(?)').get(username);
     const genericError = new HttpError(401, 'Username atau password salah');
     if (!user) throw genericError;
     if (!user.active) throw new HttpError(403, 'Akun dinonaktifkan. Hubungi Admin Sistem.');

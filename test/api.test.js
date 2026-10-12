@@ -40,6 +40,11 @@ before(async () => {
 
 after(() => { if (server) server.close(); if (db) db.close(); });
 
+test('login: username tidak peka huruf besar/kecil', async () => {
+  const r = await call('POST', '/auth/login', null, { username: ' SPV ', password: PASSWORD });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+});
+
 test('login gagal dengan password salah dan tanpa token ditolak', async () => {
   const bad = await call('POST', '/auth/login', null, { username: 'spv', password: 'salah' });
   assert.equal(bad.status, 401);
