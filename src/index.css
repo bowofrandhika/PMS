@@ -46,6 +46,7 @@
 }
 
 /* ---------------------------------------------------------------- base ---- */
+@layer base {
 html {
   color-scheme: dark;
   -webkit-text-size-adjust: 100%;
@@ -108,7 +109,9 @@ input::placeholder {
   background: linear-gradient(180deg, rgba(34, 211, 238, 0.75), rgba(168, 85, 247, 0.7));
   background-clip: padding-box;
 }
+}
 
+@layer components {
 /* ==================================================================== bg === */
 .aura-field {
   position: fixed;
@@ -851,6 +854,8 @@ input::placeholder {
 }
 .toast-life {
   animation: toast-life 9s linear forwards;
+}
+
 }
 
 /* Reduced motion ---------------------------------------------------------- */
