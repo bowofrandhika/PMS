@@ -42,9 +42,8 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     const norm = D.normalizePlanInput(db, body, { HttpError: null, badRequest });
     if (!norm.plan_date) throw badRequest('plan_date wajib diisi');
     if (!norm.shift_code) throw badRequest('shift_code wajib diisi');
-    const count = db.prepare('SELECT COUNT(*) AS n FROM production_plans').get().n + 1;
-    const generated = `PP-${norm.plan_date.replace(/-/g, '')}-S${norm.shift_code}-${String(count).padStart(4, '0')}`;
-    const planNo = body.plan_no ? String(body.plan_no).trim().slice(0, 40) : generated;
+    // Nomor Produksi dibuat otomatis: DP-DDMMYY-NNN (input dari user diabaikan).
+    const planNo = D.productionNo(db, norm.plan_date);
     const info = db.prepare(`INSERT INTO production_plans
       (plan_no, version, status, plan_date, shift_code, work_order, product, target_bale, target_kg, target_trolley,
        dryers, presses, sampling_rules, cake_interval_min, batch_sequence, notes, created_by, created_at)
@@ -62,7 +61,9 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     if (plan.status !== 'DRAFT') throw conflict('Plan yang sudah APPROVED/ACTIVE tidak dapat diubah langsung. Gunakan revisi plan (versi baru).');
     const norm = D.normalizePlanInput(db, req.body || {}, { HttpError: null, badRequest });
     // Hanya field yang benar-benar dikirim pada revisi yang menimpa nilai versi sebelumnya.
-    const provided = Object.fromEntries(Object.entries(norm).filter(([k]) => req.body[k] !== undefined));
+    // Target Bale dan kg saling mengisi: jika salah satunya diubah, keduanya ikut dihitung ulang.
+    const targetTouched = req.body.target_bale !== undefined || req.body.target_kg !== undefined;
+    const provided = Object.fromEntries(Object.entries(norm).filter(([k]) => req.body[k] !== undefined || (targetTouched && (k === 'target_bale' || k === 'target_kg'))));
     const merged = { ...plan, ...provided };
     db.prepare(`UPDATE production_plans SET plan_date=?, shift_code=?, work_order=?, product=?, target_bale=?, target_kg=?, target_trolley=?,
       dryers=?, presses=?, sampling_rules=?, cake_interval_min=?, batch_sequence=?, notes=? WHERE id=?`).run(
@@ -72,6 +73,65 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     const after = loadPlan(plan.id);
     audit(db, req.user, { action: 'UPDATE', entity: 'production_plans', recordId: plan.id, oldValue: plan, newValue: after });
     res.json({ item: after });
+  });
+
+  // ---------- Work Order (WO) ----------
+  // WO per buyer (contoh WO-BELL-001 Bellshina 500 ton). Dikelola SPV, Manager, Direktur, Admin web.
+  // Tidak ada hard delete: WO dinonaktifkan (status NONAKTIF).
+  function loadWo(id) {
+    const wo = db.prepare('SELECT * FROM work_orders WHERE id = ?').get(id);
+    if (!wo) throw notFound(`Work Order #${id}`);
+    return wo;
+  }
+  function woFields(b, { partial = false } = {}) {
+    const out = {};
+    if (!partial || b.buyer !== undefined) out.buyer = requireString(b, 'buyer', { max: 120 });
+    if (!partial || b.target_ton !== undefined) {
+      out.target_ton = requireNumber(b, 'target_ton', { min: 0.001, max: 1000000 });
+      out.target_kg = Math.round(out.target_ton * 1000 * 1000) / 1000;
+    }
+    if (!partial || b.notes !== undefined) out.notes = b.notes ? String(b.notes).slice(0, 500) : null;
+    return out;
+  }
+
+  r.get('/work-orders', requireAuth, requirePerm('plan.view'), (req, res) => {
+    const items = db.prepare('SELECT * FROM work_orders ORDER BY status, wo_no').all();
+    res.json({ items });
+  });
+
+  r.post('/work-orders', requireAuth, requirePerm('wo.write'), (req, res) => {
+    const b = req.body || {};
+    const woNo = requireString(b, 'wo_no', { max: 40 }).toUpperCase();
+    if (!/^WO-[A-Z0-9-]+$/.test(woNo)) throw badRequest('Nomor WO harus diawali WO- (huruf besar, angka, tanda -)');
+    const f = woFields(b);
+    if (db.prepare('SELECT id FROM work_orders WHERE wo_no = ?').get(woNo)) throw conflict(`Work Order ${woNo} sudah ada`);
+    const at = nowIso();
+    const info = db.prepare(`INSERT INTO work_orders (wo_no, buyer, target_ton, target_kg, status, notes, created_by, created_at)
+      VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`).run(woNo, f.buyer, f.target_ton, f.target_kg, f.notes ?? null, req.user.username, at);
+    const item = loadWo(Number(info.lastInsertRowid));
+    audit(db, req.user, { action: 'CREATE', entity: 'work_orders', recordId: item.id, newValue: item });
+    res.status(201).json({ item });
+  });
+
+  r.patch('/work-orders/:id', requireAuth, requirePerm('wo.write'), (req, res) => {
+    const wo = loadWo(Number(req.params.id));
+    const f = woFields(req.body || {}, { partial: true });
+    const merged = { ...wo, ...f };
+    if (f.target_ton !== undefined) merged.target_kg = f.target_kg;
+    db.prepare('UPDATE work_orders SET buyer = ?, target_ton = ?, target_kg = ?, notes = ?, updated_by = ?, updated_at = ? WHERE id = ?')
+      .run(merged.buyer, merged.target_ton, merged.target_kg, merged.notes, req.user.username, nowIso(), wo.id);
+    const after = loadWo(wo.id);
+    audit(db, req.user, { action: 'UPDATE', entity: 'work_orders', recordId: wo.id, oldValue: wo, newValue: after });
+    res.json({ item: after });
+  });
+
+  r.post('/work-orders/:id/toggle', requireAuth, requirePerm('wo.write'), (req, res) => {
+    const wo = loadWo(Number(req.params.id));
+    const next = wo.status === 'ACTIVE' ? 'NONAKTIF' : 'ACTIVE';
+    db.prepare('UPDATE work_orders SET status = ?, updated_by = ?, updated_at = ? WHERE id = ?').run(next, req.user.username, nowIso(), wo.id);
+    const after = loadWo(wo.id);
+    audit(db, req.user, { action: 'UPDATE', entity: 'work_orders', recordId: wo.id, oldValue: wo, newValue: after });
+    res.json({ item: after, note: next === 'NONAKTIF' ? 'WO dinonaktifkan; Nomor Produksi lama tetap menyimpan WO ini.' : 'WO diaktifkan kembali.' });
   });
 
   r.post('/plans/:id/approve', requireAuth, requirePerm('plan.approve'), (req, res) => {
@@ -113,7 +173,9 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     const reason = requireString(req.body || {}, 'reason', { max: 500 });
     const norm = D.normalizePlanInput(db, req.body || {}, { HttpError: null, badRequest });
     // Hanya field yang benar-benar dikirim pada revisi yang menimpa nilai versi sebelumnya.
-    const provided = Object.fromEntries(Object.entries(norm).filter(([k]) => req.body[k] !== undefined));
+    // Target Bale dan kg saling mengisi: jika salah satunya diubah, keduanya ikut dihitung ulang.
+    const targetTouched = req.body.target_bale !== undefined || req.body.target_kg !== undefined;
+    const provided = Object.fromEntries(Object.entries(norm).filter(([k]) => req.body[k] !== undefined || (targetTouched && (k === 'target_bale' || k === 'target_kg'))));
     const merged = { ...plan, ...provided };
     const info = db.prepare(`INSERT INTO production_plans
       (plan_no, version, supersedes_id, status, plan_date, shift_code, work_order, product, target_bale, target_kg, target_trolley,

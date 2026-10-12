@@ -83,9 +83,9 @@ test('RBAC: operator MD tidak dapat membuat Production Plan; QC tidak dapat star
 let planId;
 test('plan: DRAFT dibuat, approver tidak boleh sama dengan pembuat (maker-checker), lalu ACTIVE', async () => {
   const c = await call('POST', '/plans', 'spv', {
-    plan_no: 'PLN-2610-001', plan_date: '2026-10-12', shift_code: '1', work_order: 'WO-2610-001', product: 'Produk Kering',
+    plan_date: '2026-10-12', shift_code: '1', work_order: 'WO-BELL-001', product: 'SIR20',
     target_bale: 200, dryers: ['DRY-A'], presses: ['PRS-A'], cake_interval_min: 30,
-    batch_sequence: [{ batch_code: 'B-2610-001', seq: 1 }], sampling_rules: [{ type: 'TIME_INTERVAL', interval_min: 30 }, { type: 'TROLLEY_INTERVAL', n: 5 }],
+    batch_sequence: [{ batch_code: 'B-0001', seq: 1 }], sampling_rules: [{ type: 'TIME_INTERVAL', interval_min: 30 }, { type: 'TROLLEY_INTERVAL', n: 5 }],
   });
   assert.equal(c.status, 201, JSON.stringify(c.data));
   planId = c.data.item.id;
@@ -201,7 +201,7 @@ test('MD: challenge wajib PASS sebelum start; count Bale; exception wajib chambe
   const bale = await call('POST', '/md/bales', 'opmd', { plan_id: planId, qty: 3 });
   assert.equal(bale.status, 201, JSON.stringify(bale.data));
   assert.equal(bale.data.pallet.slot_count, 3);
-  assert.equal(bale.data.batch, 'B-2610-001');
+  assert.equal(bale.data.batch, 'B-0001');
 
   const noChamber = await call('POST', '/md/exceptions', 'opmd', { plan_id: planId, category: 'REJECT_METAL', metal_type: 'FE' });
   assert.equal(noChamber.status, 400, 'chamber wajib untuk exception');

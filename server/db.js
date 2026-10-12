@@ -146,6 +146,21 @@ CREATE TABLE IF NOT EXISTS consumable_prices (
   created_at TEXT NOT NULL
 );
 
+-- ===== Work Order (WO) per buyer =====
+CREATE TABLE IF NOT EXISTS work_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  wo_no TEXT NOT NULL UNIQUE,            -- contoh WO-BELL-001
+  buyer TEXT NOT NULL,
+  target_ton REAL NOT NULL,
+  target_kg REAL NOT NULL,               -- = target_ton x 1000
+  status TEXT NOT NULL DEFAULT 'ACTIVE', -- ACTIVE | NONAKTIF (tidak ada hard delete)
+  notes TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_by TEXT,
+  updated_at TEXT
+);
+
 -- ===== Production Plan =====
 CREATE TABLE IF NOT EXISTS production_plans (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -548,11 +563,40 @@ function seedMasterData(db) {
     ins.run('B-2610-003', 'WO-2610-003', 'Produk Kering', 'Grade B', 'Blanket - Sumber 1', today);
   }
 
+  // Kode batch produksi B-0001..B-0003 (urutan batch pada Nomor Produksi).
+  for (const code of ['B-0001', 'B-0002', 'B-0003']) {
+    const exists = db.prepare('SELECT id FROM batches WHERE code = ?').get(code);
+    if (!exists) {
+      db.prepare('INSERT INTO batches (code, product, grade, status, effective_date) VALUES (?, ?, ?, ?, ?)')
+        .run(code, 'SIR20', 'SIR20', 'ACTIVE', new Date().toISOString().slice(0, 10));
+    }
+  }
+
+  // Contoh WO dari user (sample data; dapat dinonaktifkan atau diubah di menu Work Order).
+  if (count('work_orders') === 0) {
+    const now = new Date().toISOString();
+    const ins = db.prepare('INSERT INTO work_orders (wo_no, buyer, target_ton, target_kg, status, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    ins.run('WO-BELL-001', 'Bellshina', 500, 500000, 'ACTIVE', 'Contoh data awal', 'seed', now);
+    ins.run('WO-GY-001', 'Goodyear', 300, 300000, 'ACTIVE', 'Contoh data awal', 'seed', now);
+  }
+
   if (count('validated_settings') === 0) {
     const ins = db.prepare('INSERT INTO validated_settings (product, dryer_code, b1_temp, b2_temp, timer_min, run_type, effective_date, approved_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
     const today = new Date().toISOString().slice(0, 10);
     ins.run('Produk Kering', 'DRY-A', 120, 110, 180, 'STEADY_WIP', today, 'SPV Produksi Kering');
     ins.run('Produk Kering', 'DRY-B', 120, 110, 180, 'STEADY_WIP', today, 'SPV Produksi Kering');
+
+  }
+
+  // Grade SIR20 dan SIR10 perlu validated setting per Dryer agar Nomor Produksi bisa diaktifkan.
+  for (const product of ['SIR20', 'SIR10']) {
+    const n = db.prepare('SELECT COUNT(*) AS n FROM validated_settings WHERE product = ?').get(product).n;
+    if (n === 0) {
+      const ins = db.prepare('INSERT INTO validated_settings (product, dryer_code, b1_temp, b2_temp, timer_min, run_type, effective_date, approved_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      const today = new Date().toISOString().slice(0, 10);
+      ins.run(product, 'DRY-A', 120, 110, 180, 'STEADY_WIP', today, 'SPV Produksi Kering');
+      ins.run(product, 'DRY-B', 120, 110, 180, 'STEADY_WIP', today, 'SPV Produksi Kering');
+    }
   }
 
   if (count('consumables') === 0) {

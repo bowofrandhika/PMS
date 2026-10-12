@@ -25,6 +25,25 @@ const CHAMBER_CODES = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
 const PRESS_CODES = ['PRS-A', 'PRS-B', 'PRS-C'];
 const DRYER_CODES = ['DRY-A', 'DRY-B'];
 const SAMPLING_RULE_TYPES = ['TIME_INTERVAL', 'TROLLEY_INTERVAL', 'SPECIFIC_TROLLEY', 'RANDOM'];
+// Konstanta produksi (keputusan user 12 Okt 2026).
+const BALE_KG = 35;                       // 1 Bale = 35 kg
+const GRADES = ['SIR20', 'SIR10'];        // grade produk kering
+const BATCH_CODES = ['B-0001', 'B-0002', 'B-0003'];
+const WO_STATUS = ['ACTIVE', 'NONAKTIF'];
+
+// Nomor Produksi (DryProduction): DP-DDMMYY-NNN, NNN = nomor urut per tanggal produksi.
+function productionNo(db, planDate) {
+  const [y, m, d] = String(planDate).split('-');
+  const prefix = `DP-${d}${m}${y.slice(2)}-`;
+  const rows = db.prepare('SELECT DISTINCT plan_no FROM production_plans WHERE plan_no LIKE ?').all(`${prefix}%`);
+  let max = 0;
+  for (const r of rows) {
+    const n = Number(r.plan_no.slice(prefix.length));
+    if (Number.isInteger(n) && n > max) max = n;
+  }
+  return `${prefix}${String(max + 1).padStart(3, '0')}`;
+}
+
 const DRYER_COMPARTMENTS = 23;
 const PALLET_MAX_BALE = 36;
 
@@ -98,15 +117,32 @@ function normalizePlanInput(db, b, { HttpError, badRequest }) {
     out.shift_code = String(b.shift_code);
   }
   out.work_order = str('work_order', 60);
+  if (out.work_order) {
+    const wo = db.prepare('SELECT status FROM work_orders WHERE wo_no = ?').get(out.work_order);
+    if (!wo) throw badRequest(`Work Order tidak ditemukan: ${out.work_order}`);
+    if (wo.status !== 'ACTIVE') throw badRequest(`Work Order ${out.work_order} tidak aktif`);
+  }
   out.product = str('product', 120);
+  if (out.product && !GRADES.includes(out.product)) throw badRequest(`Grade harus salah satu dari: ${GRADES.join(', ')}`);
   out.notes = str('notes', 1000);
 
-  const tb = num('target_bale');
+  // Target Bale dan target kg saling mengisi: 1 Bale = 35 kg.
+  // Jika keduanya dikirim harus konsisten; jika salah satu saja, yang lain dihitung di server.
+  let tb = num('target_bale');
   if (tb != null && (!Number.isInteger(tb) || tb < 0)) throw badRequest('target_bale harus bilangan bulat >= 0');
-  out.target_bale = tb;
-  const tk = num('target_kg');
+  let tk = num('target_kg');
   if (tk != null && (!Number.isFinite(tk) || tk < 0)) throw badRequest('target_kg harus angka >= 0');
+  if (tb != null && tk != null) {
+    if (tk !== tb * BALE_KG) throw badRequest(`target_kg harus ${tb} Bale x ${BALE_KG} kg = ${tb * BALE_KG} kg`);
+  } else if (tk != null) {
+    if (tk % BALE_KG !== 0) throw badRequest(`target_kg harus kelipatan ${BALE_KG} kg (1 Bale = ${BALE_KG} kg)`);
+    tb = tk / BALE_KG;
+  } else if (tb != null) {
+    tk = tb * BALE_KG;
+  }
+  out.target_bale = tb;
   out.target_kg = tk;
+  out.target_derived = tb != null && (num('target_bale') == null || num('target_kg') == null);
   const tt = num('target_trolley');
   if (tt != null && (!Number.isInteger(tt) || tt < 0)) throw badRequest('target_trolley harus bilangan bulat >= 0');
   out.target_trolley = tt;
@@ -154,10 +190,13 @@ function normalizePlanInput(db, b, { HttpError, badRequest }) {
 
   if (b.batch_sequence != null) {
     if (!Array.isArray(b.batch_sequence)) throw badRequest('batch_sequence harus berupa array');
+    const seen = new Set();
     out.batch_sequence = b.batch_sequence.map((item, idx) => {
       if (!item || typeof item !== 'object') throw badRequest('Setiap item batch_sequence harus berupa objek');
       const code = String(item.batch_code || '').trim();
-      if (!code) throw badRequest('Setiap item batch_sequence wajib memiliki batch_code');
+      if (!BATCH_CODES.includes(code)) throw badRequest(`batch_code harus salah satu dari: ${BATCH_CODES.join(', ')}`);
+      if (seen.has(code)) throw badRequest(`batch_code ${code} duplikat dalam urutan batch`);
+      seen.add(code);
       if (!db.prepare('SELECT id FROM batches WHERE code = ?').get(code)) throw badRequest(`Batch tidak ditemukan: ${code}`);
       return { batch_code: code, seq: idx + 1, planned_kg: item.planned_kg == null || item.planned_kg === '' ? null : Number(item.planned_kg) };
     });
@@ -211,4 +250,5 @@ module.exports = {
   TROLLEY_STATUS, TROLLEY_TRANSITIONS, PLANNED_EQUIPMENT_TYPES, CHAMBER_CODES, PRESS_CODES, DRYER_CODES,
   SAMPLING_RULE_TYPES, DRYER_COMPARTMENTS, PALLET_MAX_BALE, BALE_CATEGORIES, STATUS_CATEGORY_OF, EXCEPTION_CATEGORIES,
   jakartaDate, parseJson, parsePlan, planMissingFields, normalizePlanInput, planEquipmentExists, equipmentStatusMap,
+  BALE_KG, GRADES, BATCH_CODES, WO_STATUS, productionNo,
 };

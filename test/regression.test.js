@@ -30,9 +30,9 @@ async function login(username, password = PASSWORD) {
 
 function planBody(no, extra = {}) {
   return {
-    plan_no: no, plan_date: '2026-10-12', shift_code: '1', work_order: `WO-${no}`, product: 'Produk Kering',
+    plan_date: '2026-10-12', shift_code: '1', work_order: 'WO-BELL-001', product: 'SIR20',
     target_bale: 200, dryers: ['DRY-A'], presses: ['PRS-A'], cake_interval_min: 30,
-    batch_sequence: [{ batch_code: 'B-2610-001', seq: 1 }],
+    batch_sequence: [{ batch_code: 'B-0001', seq: 1 }],
     sampling_rules: [{ type: 'TIME_INTERVAL', interval_min: 30 }],
     ...extra,
   };
@@ -152,7 +152,7 @@ test('B-05/B-07: exception Reject menyimpan pallet milik plan yang sama; pallet 
   assert.equal(comp.n, 0);
 
   // Pallet milik plan lain (plan sudah CLOSED, dibuat langsung di database untuk skenario ini).
-  const otherId = db.prepare("SELECT id FROM production_plans WHERE plan_no = 'REG-OEE'").get().id;  // sudah CLOSED
+  const otherId = db.prepare("SELECT id FROM production_plans WHERE status = 'CLOSED' ORDER BY id LIMIT 1").get().id;  // sudah CLOSED
   const otherPallet = db.prepare(`INSERT INTO pallets (plan_id, manual_no, forming_box_code, status, location, max_bale, created_at, created_by)
     VALUES (?, NULL, NULL, 'OPEN', 'Area Palletizing', 36, ?, 'test')`).run(otherId, new Date().toISOString());
   const otherPalletId = Number(otherPallet.lastInsertRowid);
@@ -177,7 +177,7 @@ test('B-09: slot_count menghitung semua Bale output (OK + Hold) dan kolom ok_cou
   const planId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE'").get().id;
   const ok = await call('POST', '/md/pallets', 'opmd', { plan_id: planId, location: 'Area Palletizing' });
   assert.equal(ok.status, 201);
-  const bale = await call('POST', '/md/bales', 'opmd', { plan_id: planId, pallet_id: ok.data.item.id, batch_code: 'B-2610-001', qty: 2 });
+  const bale = await call('POST', '/md/bales', 'opmd', { plan_id: planId, pallet_id: ok.data.item.id, batch_code: 'B-0001', qty: 2 });
   assert.equal(bale.status, 201, JSON.stringify(bale.data));
   assert.equal(db.prepare('SELECT slot_count FROM pallets WHERE id = ?').get(ok.data.item.id).slot_count, 2);
   // Hold tidak boleh dicampur ke pallet OK (PAL-004); pallet terpisah.
@@ -244,4 +244,64 @@ test('B-09 migrasi: database lama (kolom ok_count) dibuka dan kolom diganti slot
   } finally {
     for (const f of [file, `${file}-wal`, `${file}-shm`]) fs.rmSync(f, { force: true });
   }
+});
+
+test('Nomor Produksi: format DP-DDMMYY-NNN, nomor urut per tanggal, input plan_no diabaikan', async () => {
+  const a = await call('POST', '/plans', 'spv', planBody('IGNORED-1', { plan_date: '2026-10-12', target_bale: 10 }));
+  assert.equal(a.status, 201, JSON.stringify(a.data));
+  assert.match(a.data.item.plan_no, /^DP-121026-\d{3}$/);
+  const b = await call('POST', '/plans', 'spv', planBody('IGNORED-2', { plan_date: '2026-10-12', target_bale: 10 }));
+  assert.equal(b.status, 201);
+  const na = Number(a.data.item.plan_no.slice(-3));
+  assert.equal(Number(b.data.item.plan_no.slice(-3)), na + 1);
+  assert.equal(b.data.item.plan_no.slice(0, 10), 'DP-121026-');
+  const c = await call('POST', '/plans', 'spv', planBody('IGNORED-3', { plan_date: '2026-10-13', target_bale: 10 }));
+  assert.equal(c.data.item.plan_no.slice(0, 10), 'DP-131026-');
+  assert.equal(c.data.item.plan_no.slice(-3), '001');
+});
+
+test('Target Bale dan kg saling mengisi (1 Bale = 35 kg); yang diisi duluan yang dipakai', async () => {
+  const byBale = await call('POST', '/plans', 'spv', planBody('T-1', { target_bale: 1000, target_kg: undefined }));
+  assert.equal(byBale.status, 201, JSON.stringify(byBale.data));
+  assert.equal(byBale.data.item.target_kg, 35000);
+  const byKg = await call('POST', '/plans', 'spv', planBody('T-2', { target_bale: undefined, target_kg: 7000 }));
+  assert.equal(byKg.status, 201, JSON.stringify(byKg.data));
+  assert.equal(byKg.data.item.target_bale, 200);
+  const mismatch = await call('POST', '/plans', 'spv', planBody('T-3', { target_bale: 10, target_kg: 999 }));
+  assert.equal(mismatch.status, 400);
+  const notMultiple = await call('POST', '/plans', 'spv', planBody('T-4', { target_bale: undefined, target_kg: 1000 }));
+  assert.equal(notMultiple.status, 400);
+  // PATCH: mengubah target kg menghitung ulang target Bale.
+  const patched = await call('PATCH', `/plans/${byBale.data.item.id}`, 'spv', { target_kg: 3500 });
+  assert.equal(patched.status, 200, JSON.stringify(patched.data));
+  assert.equal(patched.data.item.target_bale, 100);
+});
+
+test('Grade hanya SIR20 atau SIR10; urutan batch hanya B-0001..B-0003 tanpa duplikat', async () => {
+  assert.equal((await call('POST', '/plans', 'spv', planBody('G-1', { product: 'Produk Kering' }))).status, 400);
+  assert.equal((await call('POST', '/plans', 'spv', planBody('G-2', { product: 'SIR10' }))).status, 201);
+  assert.equal((await call('POST', '/plans', 'spv', planBody('G-3', { batch_sequence: [{ batch_code: 'B-2610-001', seq: 1 }] }))).status, 400);
+  assert.equal((await call('POST', '/plans', 'spv', planBody('G-4', { batch_sequence: [{ batch_code: 'B-0001', seq: 1 }, { batch_code: 'B-0001', seq: 2 }] }))).status, 400);
+  const ok = await call('POST', '/plans', 'spv', planBody('G-5', { batch_sequence: [{ batch_code: 'B-0001', seq: 1 }, { batch_code: 'B-0002', seq: 2 }, { batch_code: 'B-0003', seq: 3 }] }));
+  assert.equal(ok.status, 201, JSON.stringify(ok.data));
+});
+
+test('Work Order: dibuat oleh SPV, nomor unik, WO nonaktif tidak bisa dipakai plan, tidak ada hard delete', async () => {
+  const list = await call('GET', '/work-orders', 'spv');
+  assert.equal(list.status, 200);
+  assert.ok(list.data.items.some((w) => w.wo_no === 'WO-BELL-001' && w.target_ton === 500));
+  const created = await call('POST', '/work-orders', 'spv', { wo_no: 'wo-test-900', buyer: 'Uji', target_ton: 12.5 });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  assert.equal(created.data.item.wo_no, 'WO-TEST-900');
+  assert.equal(created.data.item.target_kg, 12500);
+  assert.equal((await call('POST', '/work-orders', 'spv', { wo_no: 'WO-TEST-900', buyer: 'Uji', target_ton: 1 })).status, 409);
+  assert.equal((await call('POST', '/work-orders', 'opmd', { wo_no: 'WO-TEST-901', buyer: 'Uji', target_ton: 1 })).status, 403);
+  const id = created.data.item.id;
+  const off = await call('POST', `/work-orders/${id}/toggle`, 'spv', {});
+  assert.equal(off.data.item.status, 'NONAKTIF');
+  assert.equal((await call('POST', '/plans', 'spv', planBody('WO-OFF', { work_order: 'WO-TEST-900' }))).status, 400);
+  const on = await call('POST', `/work-orders/${id}/toggle`, 'spv', {});
+  assert.equal(on.data.item.status, 'ACTIVE');
+  const upd = await call('PATCH', `/work-orders/${id}`, 'spv', { target_ton: 20 });
+  assert.equal(upd.data.item.target_kg, 20000);
 });

@@ -26,6 +26,9 @@
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const has = (p) => !!S.me && S.me.permissions.includes(p);
   const hasAny = (ps) => ps.some(has);
+  const GRADES = ['SIR20', 'SIR10'];
+  const BATCH_CODES = ['B-0001', 'B-0002', 'B-0003'];
+  const BALE_KG = 35;
   const fmt = (n) => (n === null || n === undefined ? '—' : typeof n === 'number' ? n.toLocaleString('id-ID') : esc(n));
   const badge = (text, cls = '') => `<span class="badge ${cls}">${esc(text)}</span>`;
   const statusCls = (s) => (/CLOSED|OK|PASS|VERIFIED|APPROVED|ACTIVE|RELEASED|EXECUTED/.test(s) ? 'ok' : /HOLD|REJECT|FAIL|OVERDUE|INCOMPLETE|PENDING|REQUESTED|STOPPED/.test(s) ? 'warn' : '');
@@ -84,7 +87,8 @@
   // ---------- layout ----------
   const TABS = [
     { id: 'dash', label: 'Dashboard', ok: () => has('dashboard.view'), view: viewDash },
-    { id: 'plan', label: 'Production Plan', ok: () => has('plan.view'), view: viewPlan },
+    { id: 'plan', label: 'Nomor Produksi', ok: () => has('plan.view'), view: viewPlan },
+    { id: 'wo', label: 'Work Order', ok: () => has('plan.view'), view: viewWO },
     { id: 'shift', label: 'Shift Mandor', ok: () => has('plan.view'), view: viewShift },
     { id: 'dryer', label: 'Dryer Board', ok: () => has('dryer.view'), view: viewDryer },
     { id: 'md', label: 'MD & Pallet', ok: () => has('plan.view'), view: viewMD },
@@ -242,11 +246,43 @@
     }
   }
 
+  // Sampling rule dari form biasa (bukan JSON), sama seperti kolom lain pada Nomor Produksi.
+  function buildSampling(b) {
+    const rules = [];
+    if (b.sr_time) rules.push({ type: 'TIME_INTERVAL', interval_min: Number(b.sr_time) });
+    if (b.sr_trolley) rules.push({ type: 'TROLLEY_INTERVAL', n: Number(b.sr_trolley) });
+    const list = String(b.sr_specific || '').split(',').map((x) => x.trim()).filter(Boolean);
+    if (list.length) rules.push({ type: 'SPECIFIC_TROLLEY', trolleys: list });
+    if (b.sr_random) rules.push({ type: 'RANDOM', target: Number(b.sr_random) });
+    return rules;
+  }
+
   // ---------- form handlers ----------
   const FORMS = {
     planCreate: {
       reloadPlans: true,
-      submit: (b) => api('POST', '/plans', b).then((r) => ({ msg: `Plan ${r.item.plan_no} dibuat (DRAFT).` })),
+      submit: (b) => {
+        const body = { ...b };
+        const seq = [1, 2, 3].map((i) => body[`batch_seq_${i}`]).filter(Boolean);
+        if (new Set(seq).size !== seq.length) throw new Error('Urutan batch tidak boleh duplikat.');
+        body.batch_sequence = seq.map((code, i) => ({ batch_code: code, seq: i + 1 }));
+        body.sampling_rules = buildSampling(body);
+        for (const k of Object.keys(body)) if (/^batch_seq_|^sr_/.test(k)) delete body[k];
+        // 1 Bale = 35 kg. Pakai nilai yang diisi duluan (kolom lainnya sudah terkunci otomatis).
+        if (body.target_bale !== undefined && body.target_bale !== '') {
+          body.target_bale = Math.round(Number(body.target_bale));
+          body.target_kg = body.target_bale * BALE_KG;
+        } else if (body.target_kg !== undefined && body.target_kg !== '') {
+          body.target_bale = Math.round(Number(body.target_kg) / BALE_KG);
+          body.target_kg = body.target_bale * BALE_KG;
+        } else {
+          delete body.target_bale; delete body.target_kg;
+        }
+        return api('POST', '/plans', body).then((r) => ({ msg: `Nomor Produksi ${r.item.plan_no} dibuat (DRAFT).` }));
+      },
+    },
+    woCreate: {
+      submit: (b) => api('POST', '/work-orders', b).then((r) => ({ msg: `WO ${r.item.wo_no} disimpan.` })),
     },
     shiftOpen: {
       submit: (b) => api('POST', '/shifts', { ...b, plan_id: S.planId }).then((r) => { S.shiftId = r.item.id; return { msg: 'Shift dibuka.' }; }),
@@ -334,6 +370,7 @@
     const plans = (await api('GET', '/plans')).items;
     S.plans = plans;
     const canWrite = has('plan.write');
+    const wos = canWrite ? (await api('GET', '/work-orders')).items.filter((w) => w.status === 'ACTIVE') : [];
     const canApprove = has('plan.approve');
     const rows = plans.map((p) => {
       const acts = [];
@@ -341,7 +378,7 @@
       if (canApprove && p.status === 'APPROVED') acts.push(`<button class="btn" data-api="POST|/plans/:id/activate" data-id="${p.id}" data-ok="Plan diaktifkan. Versi induk di-SUPERSEDE.">Aktifkan</button>`);
       if (canWrite && p.status === 'ACTIVE') acts.push(`<button class="btn sec" data-api="POST|/plans/:id/revise" data-id="${p.id}" data-prompt="Alasan revisi (JSON: {&quot;reason&quot;:&quot;...&quot;, ...perubahan}):" data-default='{"reason":""}' data-ok="Revisi dibuat sebagai versi baru (DRAFT).">Revisi</button>`);
       if (canApprove && p.status === 'ACTIVE') acts.push(`<button class="btn warn" data-api="POST|/plans/:id/close" data-id="${p.id}" data-confirm="Tutup plan ini?" data-ok="Plan ditutup.">Close</button>`);
-      return tr([`<button class="link" data-act="select" data-key="plan" data-id="${p.id}">#${p.id}</button>`, esc(p.plan_no), fmt(p.version), `<span class="badge ${statusCls(p.status)}">${esc(p.status)}</span>`, esc(p.plan_date), esc(p.shift_code), esc(p.product), fmt(p.target_bale), esc(p.dryers.join(', ')), esc(p.presses.join(', ')), acts.join(' ')]);
+      return tr([`<button class="link" data-act="select" data-key="plan" data-id="${p.id}">#${p.id}</button>`, esc(p.plan_no), fmt(p.version), `<span class="badge ${statusCls(p.status)}">${esc(p.status)}</span>`, esc(p.plan_date), esc(p.shift_code), esc(p.work_order || '—'), esc(p.product), fmt(p.target_bale), esc(p.dryers.join(', ')), esc(p.presses.join(', ')), acts.join(' ')]);
     });
     let equip = '';
     if (S.planId) {
@@ -349,27 +386,60 @@
       equip = table(['Equipment', 'Nama', 'Tipe', 'Status'], es.items.map((x) => tr([esc(x.code), esc(x.name), esc(x.type), `<span class="badge ${statusCls(x.status || '')}">${esc(x.status || 'PLANNED')}</span>`])));
     }
     return `
-      <h1>Production Plan</h1>
-      ${table(['ID', 'No. Plan', 'Versi', 'Status', 'Tanggal', 'Shift', 'Produk', 'Target Bale', 'Dryer', 'Press', 'Aksi'], rows)}
-      <p class="muted" style="font-size:12px">Plan DRAFT → APPROVED → ACTIVE → CLOSED. Versi lama menjadi SUPERSEDED dan tidak ditimpa. Approver tidak boleh sama dengan pembuat (maker-checker).</p>
-      ${canWrite ? `<h2>Buat Plan baru (DRAFT)</h2>
+      <h1>Nomor Produksi</h1>
+      ${table(['ID', 'Nomor Produksi', 'Versi', 'Status', 'Tanggal', 'Shift', 'Work Order', 'Grade', 'Target Bale', 'Dryer', 'Press', 'Aksi'], rows)}
+      <p class="muted" style="font-size:12px">Nomor Produksi (DRAFT) → APPROVED → ACTIVE → CLOSED. Versi lama menjadi SUPERSEDED dan tidak ditimpa. Approver tidak boleh sama dengan pembuat (maker-checker).</p>
+      ${canWrite ? `<h2>Buat Nomor Produksi baru (DRAFT)</h2>
+      <p class="muted" style="font-size:12px">Nomor dibuat otomatis: <b>DP-DDMMYY-NNN</b> (tanggal produksi + nomor urut hari itu).</p>
+      ${wos.length ? '' : '<div class="msg info">Belum ada Work Order aktif. Tambahkan di menu Work Order.</div>'}
       <form class="inline" data-form="planCreate">
-        ${field('plan_no', 'No. Plan', { required: true, placeholder: 'PLN-2610-001' })}
-        ${field('plan_date', 'Tanggal', { required: true, type: 'date', value: new Date().toISOString().slice(0, 10) })}
-        ${field('shift_code', 'Shift', { required: true, value: '1' })}
-        ${field('work_order', 'Work Order', { value: 'WO-2610-001' })}
-        ${field('product', 'Produk / Grade', { value: 'Produk Kering' })}
-        ${field('target_bale', 'Target Bale', { type: 'num' })}
-        ${field('target_kg', 'Target kg', { type: 'num' })}
+        ${field('plan_date', 'Tanggal produksi', { required: true, type: 'date', value: new Date().toISOString().slice(0, 10) })}
+        ${field('shift_code', 'Shift', { required: true, select: ['1', '2', '3'], value: '1' })}
+        ${field('work_order', 'Work Order (WO)', { required: true, select: wos.map((w) => ({ value: w.wo_no, label: `${w.wo_no} · ${w.buyer} · ${w.target_ton} ton` })) })}
+        ${field('product', 'Grade', { required: true, select: GRADES })}
+        <label>Target Bale<input type="number" name="target_bale" min="0" step="1" data-sync="bale"></label>
+        <label>Target kg<input type="number" name="target_kg" min="0" step="35" data-sync="kg"></label>
+        <p class="muted" style="font-size:12px;flex-basis:100%">1 Bale = 35 kg. Isi salah satu; yang lain terisi otomatis (yang diisi duluan yang dipakai).</p>
         ${field('cake_interval_min', 'Interval berat Cake (menit)', { select: [30, 60], value: 60, type: 'num' })}
         <div><div class="muted" style="font-size:12px">Dryer aktif</div>${checks('dryers', ['DRY-A', 'DRY-B'], ['DRY-A'])}</div>
         <div><div class="muted" style="font-size:12px">Press aktif</div>${checks('presses', ['PRS-A', 'PRS-B', 'PRS-C'], ['PRS-A'])}</div>
-        ${field('batch_sequence', 'Urutan Batch (JSON)', { type: 'json', textarea: true, value: '[{"batch_code":"B-2610-001","seq":1}]' })}
-        ${field('sampling_rules', 'Sampling rule (JSON)', { type: 'json', textarea: true, value: '[{"type":"TIME_INTERVAL","interval_min":30}]' })}
+        <div style="flex-basis:100%"><div class="muted" style="font-size:12px">Urutan batch</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">${[1, 2, 3].map((i) => field(`batch_seq_${i}`, `Urutan ${i}`, { select: [{ value: '', label: '—' }, ...BATCH_CODES.map((c) => ({ value: c, label: c }))] })).join('')}</div></div>
+        <div style="flex-basis:100%"><div class="muted" style="font-size:12px">Sampling (kosongkan yang tidak dipakai)</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            ${field('sr_time', 'Interval waktu (menit)', { type: 'num', value: 30 })}
+            ${field('sr_trolley', 'Setiap N trolley', { type: 'num' })}
+            ${field('sr_specific', 'Trolley khusus (pisahkan koma)', { placeholder: 'TRL-01, TRL-05' })}
+            ${field('sr_random', 'Target sampel random', { type: 'num' })}
+          </div></div>
         <button class="btn" type="submit">Simpan DRAFT</button>
-      </form>` : ''}
-      <h2>Status equipment (plan terpilih)</h2>
+      </form>
+` : ''}
+      <h2>Status equipment (Nomor Produksi terpilih)</h2>
       ${equip || '<p class="muted">Pilih plan.</p>'}`;
+  }
+
+  // ---------- VIEW: Work Order ----------
+  async function viewWO() {
+    const items = (await api('GET', '/work-orders')).items;
+    const canWrite = has('wo.write');
+    const rows = items.map((w) => tr([
+      esc(w.wo_no), esc(w.buyer), fmt(w.target_ton), fmt(w.target_kg),
+      `<span class="badge ${statusCls(w.status)}">${esc(w.status)}</span>`, esc(w.created_by || '—'),
+      canWrite ? `<button class="btn sec" data-api="PATCH|/work-orders/:id" data-id="${w.id}" data-prompt="Ubah WO (JSON: buyer, target_ton, notes):" data-default="${esc(JSON.stringify({ buyer: w.buyer, target_ton: w.target_ton, notes: w.notes || '' }))}" data-ok="WO diperbarui.">Ubah</button> <button class="btn ${w.status === 'ACTIVE' ? 'warn' : ''}" data-api="POST|/work-orders/:id/toggle" data-id="${w.id}" data-ok="Status WO diubah.">${w.status === 'ACTIVE' ? 'Nonaktifkan' : 'Aktifkan'}</button>` : '',
+    ]));
+    return `
+      <h1>Work Order (WO)</h1>
+      ${table(['Nomor WO', 'Buyer', 'Target (ton)', 'Target (kg)', 'Status', 'Dibuat oleh', 'Aksi'], rows)}
+      <p class="muted" style="font-size:12px">WO = pesanan buyer dengan target tonase. Nomor Produksi harian memilih satu WO. Tidak ada hapus permanen; WO yang tidak dipakai dinonaktifkan.</p>
+      ${canWrite ? `<h2>Tambah WO</h2>
+      <form class="inline" data-form="woCreate">
+        ${field('wo_no', 'Nomor WO', { required: true, placeholder: 'WO-BELL-002' })}
+        ${field('buyer', 'Buyer', { required: true, placeholder: 'Bellshina' })}
+        ${field('target_ton', 'Target (ton)', { required: true, type: 'num' })}
+        ${field('notes', 'Catatan')}
+        <button class="btn" type="submit">Simpan WO</button>
+      </form>` : ''}`;
   }
 
   // ---------- VIEW: Shift Mandor ----------
@@ -388,7 +458,7 @@
         <div class="card"><b>Event Mandor</b>
           <form class="inline" data-form="mandorEvent">
             ${field('kind', 'Jenis', { select: ['HARVEST', 'TRANSFER_BLANKET', 'SHREDDER_START', 'SHREDDER_STOP', 'FILLING', 'MOVEMENT'] })}
-            ${field('batch_code', 'Batch', { value: 'B-2610-001' })}
+            ${field('batch_code', 'Batch', { value: 'B-0001' })}
             ${field('trolley_code', 'Trolley', { value: 'TRL-01' })}
             ${field('qty_kg', 'Qty kg', { type: 'num' })}
             ${field('from_loc', 'Dari')}${field('to_loc', 'Ke')}${field('forklift_code', 'Forklift')}
@@ -738,6 +808,19 @@
   // ---------- bootstrap ----------
   document.addEventListener('click', (e) => { onClick(e); onExtra(e); });
   document.addEventListener('submit', onSubmit);
+  // Target Bale dan kg: kolom yang diisi duluan dipakai; kolom satunya terkunci dan terisi otomatis.
+  document.addEventListener('input', (e) => {
+    const el = e.target;
+    if (!el.dataset || !el.dataset.sync || !el.form) return;
+    const other = el.form.querySelector(el.dataset.sync === 'bale' ? '[data-sync="kg"]' : '[data-sync="bale"]');
+    if (el.value === '') { other.readOnly = false; other.value = ''; return; }
+    const v = Number(el.value);
+    other.readOnly = true;
+    other.value = el.dataset.sync === 'bale' ? v * BALE_KG : Math.round(v / BALE_KG);
+  });
+  document.addEventListener('reset', (e) => {
+    if (e.target.querySelectorAll) e.target.querySelectorAll('[data-sync]').forEach((x) => { x.readOnly = false; });
+  });
   document.addEventListener('change', (e) => {
     const el = e.target;
     if (el.dataset && (el.dataset.act === 'setPlan' || el.dataset.act === 'masterSlug')) {
