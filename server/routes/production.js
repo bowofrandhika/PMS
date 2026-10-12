@@ -60,7 +60,7 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.status(201).json({ item: plan });
   });
 
-  r.patch('/plans/:id', requireAuth, requirePerm('plan.write'), (req, res) => {
+  r.patch('/plans/:id', requireAuth, requirePerm('data.edit'), (req, res) => {
     const plan = loadPlan(Number(req.params.id));
     if (plan.status !== 'DRAFT') throw conflict('Plan yang sudah APPROVED/ACTIVE tidak dapat diubah langsung. Gunakan revisi plan (versi baru).');
     const norm = D.normalizePlanInput(db, req.body || {}, { HttpError: null, badRequest });

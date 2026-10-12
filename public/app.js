@@ -144,9 +144,10 @@
       }
       if (!S.me) { app.innerHTML = loginView(); return; }
       try { S.plans = (await api('GET', '/plans')).items; } catch (e) { S.plans = []; }
-      if (!S.planId) {
+      if (!S.planId || !S.plans.some((p) => p.id === S.planId)) {
         const active = S.plans.find((p) => p.status === 'ACTIVE') || S.plans[0];
         S.planId = active ? active.id : null;
+        S.runId = null; S.shiftId = null; S.palletId = null;
       }
       const tab = TABS.find((t) => t.id === S.tab && t.ok()) || TABS.find((t) => t.ok());
       S.tab = tab ? tab.id : 'dash';
@@ -168,6 +169,9 @@
       S.token = null; S.me = null; S.plans = []; store.del(); render();
     },
     tab(el) { S.tab = el.dataset.id; render(); },
+    editPlan(el) { S.editPlanId = Number(el.dataset.id); render(); },
+    editWo(el) { S.editWoId = Number(el.dataset.id); render(); },
+    cancelEdit() { S.editPlanId = null; S.editWoId = null; render(); },
     exportPeriod(el) {
       return ACT.run(el, async () => {
         const res = await fetch('/api/periods/current/export', { headers: { Authorization: 'Bearer ' + S.token, 'X-PMS-Token': S.token } });
@@ -270,32 +274,48 @@
     return rules;
   }
 
+  // Badan request Nomor Produksi dari form (create & edit).
+  function buildPlanBody(b) {
+    const body = { ...b };
+    const codes = String(body.batch_codes || '').split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
+    if (new Set(codes).size !== codes.length) throw new Error('Kode batch tidak boleh duplikat.');
+    body.batch_sequence = codes.map((code, i) => ({ batch_code: code, seq: i + 1 }));
+    body.sampling_rules = buildSampling(body);
+    for (const k of Object.keys(body)) if (/^batch_codes$|^sr_/.test(k)) delete body[k];
+    // 1 Bale = 35 kg. Pakai nilai yang diisi duluan (kolom lainnya sudah terkunci otomatis).
+    if (body.target_bale !== undefined && body.target_bale !== '') {
+      body.target_bale = Math.round(Number(body.target_bale));
+      body.target_kg = body.target_bale * BALE_KG;
+    } else if (body.target_kg !== undefined && body.target_kg !== '') {
+      body.target_bale = Math.round(Number(body.target_kg) / BALE_KG);
+      body.target_kg = body.target_bale * BALE_KG;
+    } else {
+      delete body.target_bale; delete body.target_kg;
+    }
+    return body;
+  }
+
   // ---------- form handlers ----------
   const FORMS = {
     planCreate: {
       reloadPlans: true,
-      submit: (b) => {
-        const body = { ...b };
-        const codes = String(body.batch_codes || '').split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
-        if (new Set(codes).size !== codes.length) throw new Error('Kode batch tidak boleh duplikat.');
-        body.batch_sequence = codes.map((code, i) => ({ batch_code: code, seq: i + 1 }));
-        body.sampling_rules = buildSampling(body);
-        for (const k of Object.keys(body)) if (/^batch_codes$|^sr_/.test(k)) delete body[k];
-        // 1 Bale = 35 kg. Pakai nilai yang diisi duluan (kolom lainnya sudah terkunci otomatis).
-        if (body.target_bale !== undefined && body.target_bale !== '') {
-          body.target_bale = Math.round(Number(body.target_bale));
-          body.target_kg = body.target_bale * BALE_KG;
-        } else if (body.target_kg !== undefined && body.target_kg !== '') {
-          body.target_bale = Math.round(Number(body.target_kg) / BALE_KG);
-          body.target_kg = body.target_bale * BALE_KG;
-        } else {
-          delete body.target_bale; delete body.target_kg;
-        }
-        return api('POST', '/plans', body).then((r) => ({ msg: `Nomor Produksi ${r.item.plan_no} dibuat (DRAFT).` }));
-      },
+      submit: (b) => api('POST', '/plans', buildPlanBody(b)).then((r) => ({ msg: `Nomor Produksi ${r.item.plan_no} dibuat (DRAFT).` })),
     },
-    masterDelete: {
-      submit: (b, form) => api('DELETE', `/master/${form.dataset.slug}/${b.id}`, { reason: b.reason }).then(() => ({ msg: 'Data master dihapus permanen (tercatat di riwayat).' })),
+    planEdit: {
+      reloadPlans: true,
+      submit: (b) => api('PATCH', `/plans/${S.editPlanId}`, buildPlanBody(b)).then((r) => ({ msg: `Nomor Produksi ${r.item.plan_no} diperbarui.` })),
+      afterSubmit: () => { S.editPlanId = null; },
+    },
+    woEdit: {
+      submit: (b) => api('PATCH', `/work-orders/${S.editWoId}`, { buyer: b.buyer, target_ton: b.target_ton, notes: b.notes || null }).then((r) => ({ msg: `WO ${r.item.wo_no} diperbarui.` })),
+      afterSubmit: () => { S.editWoId = null; },
+    },
+    masterEdit: {
+      submit: (b, form) => {
+        let patch;
+        try { patch = JSON.parse(b.body); } catch (e) { throw new Error('Isi perubahan harus JSON valid'); }
+        return api('PATCH', `/master/${form.dataset.slug}/${Number(b.id)}`, patch).then(() => ({ msg: 'Data master diperbarui.' }));
+      },
     },
     woCreate: {
       submit: (b) => api('POST', '/work-orders', b).then((r) => ({ msg: `WO ${r.item.wo_no} disimpan.` })),
@@ -381,15 +401,50 @@
       <p class="muted" style="font-size:12px">${esc(d.note)}</p>`;
   }
 
+  // Form Nomor Produksi. p = null untuk buat baru, atau plan DRAFT untuk diubah (nilai terisi).
+  function planFormHtml(p, wos) {
+    const v = p || {};
+    const batchCodes = (v.batch_sequence || []).map((b) => b.batch_code).join(', ');
+    const sr = (v.sampling_rules || []);
+    const srOf = (t) => sr.find((r) => r.type === t) || {};
+    const isEdit = !!p;
+    return `
+      ${wos.length ? '' : '<div class="msg info">Belum ada Work Order aktif. Tambahkan di menu Work Order.</div>'}
+      <form class="inline" data-form="${isEdit ? 'planEdit' : 'planCreate'}">
+        ${field('plan_date', 'Tanggal produksi', { required: true, type: 'date', value: v.plan_date || new Date().toISOString().slice(0, 10) })}
+        ${field('shift_code', 'Shift', { required: true, select: ['1', '2', '3'], value: v.shift_code || '1' })}
+        ${field('work_order', 'Work Order (WO)', { required: true, value: v.work_order || '', select: wos.map((w) => ({ value: w.wo_no, label: `${w.wo_no} · ${w.buyer} · ${w.target_ton} ton` })) })}
+        ${field('product', 'Grade', { required: true, select: GRADES, value: v.product || 'SIR20' })}
+        <label>Target Bale<input type="number" name="target_bale" min="0" step="1" data-sync="bale" value="${v.target_bale ?? ''}"></label>
+        <label>Target kg<input type="number" name="target_kg" min="0" step="35" data-sync="kg" value="${v.target_kg ?? ''}"></label>
+        <p class="muted" style="font-size:12px;flex-basis:100%">1 Bale = 35 kg. Isi salah satu; yang lain terisi otomatis (yang diisi duluan yang dipakai).</p>
+        ${field('cake_interval_min', 'Interval berat Cake (menit)', { select: [30, 60], value: v.cake_interval_min || 60, type: 'num' })}
+        <div><div class="muted" style="font-size:12px">Dryer aktif</div>${checks('dryers', ['DRY-A', 'DRY-B'], v.dryers || ['DRY-A'])}</div>
+        <div><div class="muted" style="font-size:12px">Press aktif</div>${checks('presses', ['PRS-A', 'PRS-B', 'PRS-C'], v.presses || ['PRS-A'])}</div>
+        ${field('batch_codes', 'Kode batch produksi (pisahkan koma)', { required: true, placeholder: 'B-0023, B-0024', value: batchCodes })}
+        <div style="flex-basis:100%"><div class="muted" style="font-size:12px">Sampling (kosongkan yang tidak dipakai)</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            ${field('sr_time', 'Interval waktu (menit)', { type: 'num', value: srOf('TIME_INTERVAL').interval_min ?? (isEdit ? '' : 30) })}
+            ${field('sr_trolley', 'Setiap N trolley', { type: 'num', value: srOf('TROLLEY_INTERVAL').n ?? '' })}
+            ${field('sr_specific', 'Trolley khusus (pisahkan koma)', { placeholder: 'TRL-01, TRL-05', value: (srOf('SPECIFIC_TROLLEY').trolleys || []).join(', ') })}
+            ${field('sr_random', 'Target sampel random', { type: 'num', value: srOf('RANDOM').target ?? '' })}
+          </div></div>
+        <button class="btn" type="submit">${isEdit ? 'Simpan perubahan' : 'Simpan DRAFT'}</button>
+      </form>`;
+  }
+
   // ---------- VIEW: Production Plan ----------
   async function viewPlan() {
     const plans = (await api('GET', '/plans')).items;
     S.plans = plans;
     const canWrite = has('plan.write');
     const wos = canWrite ? (await api('GET', '/work-orders')).items.filter((w) => w.status === 'ACTIVE') : [];
+    const editing = S.editPlanId ? plans.find((p) => p.id === S.editPlanId && p.status === 'DRAFT') : null;
+    if (S.editPlanId && !editing) S.editPlanId = null;
     const canApprove = has('plan.approve');
     const rows = plans.map((p) => {
       const acts = [];
+      if (has('data.edit') && p.status === 'DRAFT') acts.push(`<button class="btn sec" data-act="editPlan" data-id="${p.id}">Ubah</button>`);
       if (has('hard.delete') && p.status === 'DRAFT') acts.push(`<button class="btn bad" data-api="DELETE|/plans/:id" data-id="${p.id}" data-field="reason" data-prompt="Alasan hapus permanen (tercatat di riwayat):" data-confirm="Hapus permanen Nomor Produksi DRAFT ini?" data-ok="Nomor Produksi dihapus permanen (tersimpan di riwayat).">Hapus</button>`);
       if (canApprove && p.status === 'DRAFT') acts.push(`<button class="btn" data-api="POST|/plans/:id/approve" data-id="${p.id}" data-ok="Plan di-approve." >Approve</button>`);
       if (canApprove && p.status === 'APPROVED') acts.push(`<button class="btn" data-api="POST|/plans/:id/activate" data-id="${p.id}" data-ok="Plan diaktifkan. Versi induk di-SUPERSEDE.">Aktifkan</button>`);
@@ -413,30 +468,8 @@
       <h1>Nomor Produksi</h1>
       ${table(['ID', 'Nomor Produksi', 'Versi', 'Status', 'Tanggal', 'Shift', 'Work Order', 'Grade', 'Target Bale', 'Dryer', 'Press', 'Aksi'], rows)}
       <p class="muted" style="font-size:12px">Nomor Produksi (DRAFT) → APPROVED → ACTIVE → CLOSED. Versi lama menjadi SUPERSEDED dan tidak ditimpa. Approver tidak boleh sama dengan pembuat (maker-checker).</p>
-      ${canWrite ? `<h2>Buat Nomor Produksi baru (DRAFT)</h2>
-      ${wos.length ? '' : '<div class="msg info">Belum ada Work Order aktif. Tambahkan di menu Work Order.</div>'}
-      <form class="inline" data-form="planCreate">
-        ${field('plan_date', 'Tanggal produksi', { required: true, type: 'date', value: new Date().toISOString().slice(0, 10) })}
-        ${field('shift_code', 'Shift', { required: true, select: ['1', '2', '3'], value: '1' })}
-        ${field('work_order', 'Work Order (WO)', { required: true, select: wos.map((w) => ({ value: w.wo_no, label: `${w.wo_no} · ${w.buyer} · ${w.target_ton} ton` })) })}
-        ${field('product', 'Grade', { required: true, select: GRADES })}
-        <label>Target Bale<input type="number" name="target_bale" min="0" step="1" data-sync="bale"></label>
-        <label>Target kg<input type="number" name="target_kg" min="0" step="35" data-sync="kg"></label>
-        <p class="muted" style="font-size:12px;flex-basis:100%">1 Bale = 35 kg. Isi salah satu; yang lain terisi otomatis (yang diisi duluan yang dipakai).</p>
-        ${field('cake_interval_min', 'Interval berat Cake (menit)', { select: [30, 60], value: 60, type: 'num' })}
-        <div><div class="muted" style="font-size:12px">Dryer aktif</div>${checks('dryers', ['DRY-A', 'DRY-B'], ['DRY-A'])}</div>
-        <div><div class="muted" style="font-size:12px">Press aktif</div>${checks('presses', ['PRS-A', 'PRS-B', 'PRS-C'], ['PRS-A'])}</div>
-        ${field('batch_codes', 'Kode batch produksi (pisahkan koma)', { required: true, placeholder: 'B-0023, B-0024' })}
-        <div style="flex-basis:100%"><div class="muted" style="font-size:12px">Sampling (kosongkan yang tidak dipakai)</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            ${field('sr_time', 'Interval waktu (menit)', { type: 'num', value: 30 })}
-            ${field('sr_trolley', 'Setiap N trolley', { type: 'num' })}
-            ${field('sr_specific', 'Trolley khusus (pisahkan koma)', { placeholder: 'TRL-01, TRL-05' })}
-            ${field('sr_random', 'Target sampel random', { type: 'num' })}
-          </div></div>
-        <button class="btn" type="submit">Simpan DRAFT</button>
-      </form>
-` : ''}
+      ${canWrite && !editing ? `<h2>Buat Nomor Produksi baru (DRAFT)</h2>${planFormHtml(null, wos)}` : ''}
+      ${canWrite && editing ? `<h2>Ubah Nomor Produksi ${esc(editing.plan_no)} (DRAFT)</h2>${planFormHtml(editing, wos)}<button class="btn sec" data-act="cancelEdit" type="button">Batal ubah</button>` : ''}
       <h2>Kesiapan alat (Nomor Produksi terpilih)</h2>
       ${equip || '<p class="muted">Pilih plan.</p>'}`;
   }
@@ -446,6 +479,8 @@
     const items = (await api('GET', '/work-orders')).items;
     const canWrite = has('wo.write');
     const canDelete = has('hard.delete');
+    const editingWo = S.editWoId ? items.find((w) => w.id === S.editWoId) : null;
+    if (S.editWoId && !editingWo) S.editWoId = null;
     const ton = (kg) => (Math.round((kg / 1000) * 1000) / 1000).toLocaleString('id-ID');
     const rows = items.map((w) => tr([
       esc(w.wo_no), esc(w.buyer), fmt(w.target_ton), `${ton(w.produced_kg)}`,
@@ -453,7 +488,7 @@
       `${ton(Math.max(0, w.target_kg - w.produced_kg))}`,
       fmt(w.plans.length),
       `<span class="badge ${statusCls(w.status)}">${esc(w.status)}</span>`,
-      canWrite ? `<button class="btn sec" data-api="PATCH|/work-orders/:id" data-id="${w.id}" data-prompt="Ubah WO (JSON: buyer, target_ton, notes):" data-default="${esc(JSON.stringify({ buyer: w.buyer, target_ton: w.target_ton, notes: w.notes || '' }))}" data-ok="WO diperbarui.">Ubah</button> <button class="btn ${w.status === 'ACTIVE' ? 'warn' : ''}" data-api="POST|/work-orders/:id/toggle" data-id="${w.id}" data-ok="Status WO diubah.">${w.status === 'ACTIVE' ? 'Nonaktifkan' : 'Aktifkan'}</button>` : '',
+      canWrite ? `<button class="btn sec" data-act="editWo" data-id="${w.id}">Ubah</button> <button class="btn ${w.status === 'ACTIVE' ? 'warn' : ''}" data-api="POST|/work-orders/:id/toggle" data-id="${w.id}" data-ok="Status WO diubah.">${w.status === 'ACTIVE' ? 'Nonaktifkan' : 'Aktifkan'}</button>` : '',
       canDelete && !w.plans.length ? ` <button class="btn bad" data-api="DELETE|/work-orders/:id" data-id="${w.id}" data-field="reason" data-prompt="Alasan hapus permanen WO (tercatat di riwayat):" data-confirm="Hapus permanen WO ${esc(w.wo_no)}?" data-ok="WO dihapus permanen (tersimpan di riwayat).">Hapus</button>` : '',
     ]));
     const planRows = items.flatMap((w) => w.plans.map((p) => tr([esc(w.wo_no), esc(p.plan_no), esc(p.plan_date), esc(p.shift_code), `<span class="badge ${statusCls(p.status)}">${esc(p.status)}</span>`, fmt(p.bale), fmt(p.kg)])));
@@ -463,7 +498,15 @@
       ${table(['Nomor WO', 'Buyer', 'Target (ton)', 'Terproduksi (ton)', 'Progres', 'Sisa (ton)', 'Jml Nomor Produksi', 'Status', 'Aksi'], rows)}
       <h2>Rincian Nomor Produksi per WO</h2>
       ${table(['WO', 'Nomor Produksi', 'Tanggal', 'Shift', 'Status', 'Bale', 'kg'], planRows)}
-      ${canWrite ? `<h2>Tambah WO</h2>
+      ${canWrite && editingWo ? `<h2>Ubah WO ${esc(editingWo.wo_no)}</h2>
+      <form class="inline" data-form="woEdit">
+        ${field('buyer', 'Buyer', { required: true, value: editingWo.buyer })}
+        ${field('target_ton', 'Target (ton)', { required: true, type: 'num', value: editingWo.target_ton })}
+        ${field('notes', 'Catatan', { value: editingWo.notes || '' })}
+        <button class="btn" type="submit">Simpan perubahan</button>
+      </form>
+      <button class="btn sec" data-act="cancelEdit" type="button">Batal ubah</button>` : ''}
+      ${canWrite && !editingWo ? `<h2>Tambah WO</h2>
       <form class="inline" data-form="woCreate">
         ${field('wo_no', 'Nomor WO', { required: true, placeholder: 'WO-BELL-002' })}
         ${field('buyer', 'Buyer', { required: true, placeholder: 'Bellshina' })}
@@ -781,6 +824,7 @@
       parts.push(`<h2>Master data</h2><label>Tabel <select id="mSlug" data-act="masterSlug">${slugs.map((s) => `<option ${s === sel ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
         ${json(m.items.slice(0, 60))}
         ${has('master.write') ? `<form class="inline card" data-form="masterNew" data-slug="${sel}"><label>Data baru (JSON)<textarea name="body" data-type="json" required>{}</textarea></label><button class="btn" type="submit">Tambah</button></form>` : ''}
+        ${has('data.edit') ? `<form class="inline card" data-form="masterEdit" data-slug="${sel}"><b>Ubah data master</b> <span class="muted">(isi perubahan dalam JSON, contoh {\"name\":\"Nama baru\"})</span>${field('id', 'ID', { required: true, type: 'num' })}<label>Perubahan (JSON)<textarea name="body" data-type="str" required>{}</textarea></label><button class="btn" type="submit">Simpan perubahan</button></form>` : ''}
         ${has('hard.delete') ? `<form class="inline card" data-form="masterDelete" data-slug="${sel}"><b>Hapus permanen</b> <span class="muted">(isi tersimpan di riwayat penghapusan)</span>${field('id', 'ID', { required: true, type: 'num' })}${field('reason', 'Alasan', { required: true })}<button class="btn bad" type="submit">Hapus permanen</button></form>` : ''}`);
     }
     if (has('rbac.manage')) {

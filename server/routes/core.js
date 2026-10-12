@@ -177,7 +177,7 @@ function buildRouter(db, { requireAuth, requirePerm }) {
       res.json({ ok: true, note: 'Data dihapus permanen; isi lengkapnya tersimpan di riwayat penghapusan.' });
     });
 
-    r.patch(`/master/${slug}/:id`, requireAuth, requirePerm('master.write'), (req, res) => {
+    r.patch(`/master/${slug}/:id`, requireAuth, requirePerm('data.edit'), (req, res) => {
       const before = db.prepare(`SELECT * FROM ${def.table} WHERE id = ?`).get(Number(req.params.id));
       if (!before) throw notFound('Data master');
       const sets = [];
