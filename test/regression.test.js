@@ -3,6 +3,9 @@
 // Tes regresi untuk bug hasil review 12 Oktober 2026 (lihat docs/REVIEW-2026-10-12.md).
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { openDatabase } = require('../server/db');
 const { createApp } = require('../server/app');
 
@@ -52,7 +55,7 @@ before(async () => {
   server = app.listen(0, '127.0.0.1');
   await new Promise((r) => server.once('listening', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  for (const u of ['spv', 'spv2', 'opmd', 'opdryer']) {
+  for (const u of ['spv', 'spv2', 'opmd', 'opdryer', 'mandor']) {
     const r = await login(u);
     tokens[u] = r.data.token;
   }
@@ -63,7 +66,7 @@ after(() => { if (server) server.close(); if (db) db.close(); });
 test('B-01 OEE: gross/good dihitung dari jumlah Bale (gross_qty), bukan jumlah baris event', async () => {
   const planId = await createActivePlan('REG-OEE');
   for (const t of ['FE_2_5', 'NONFE_2_5', 'SS_2_5']) {
-    await call('POST', '/md/challenges', 'opmd', { plan_id: planId, test_type: t, result: 'PASS', context: 'START' });
+    await call('POST', '/md/challenges', 'opmd', { plan_id: planId, test_type: t, result: 'PASS' });
   }
   assert.equal((await call('POST', '/md/start', 'opmd', { plan_id: planId })).status, 201);
   assert.equal((await call('POST', '/md/bales', 'opmd', { plan_id: planId, qty: 10 })).status, 201);
@@ -132,7 +135,7 @@ test('B-05/B-07: exception Reject menyimpan pallet milik plan yang sama; pallet 
   // Plan aktif saat ini adalah REG-ACT-2 (hasil tes B-02).
   const planId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE'").get().id;
   for (const t of ['FE_2_5', 'NONFE_2_5', 'SS_2_5']) {
-    await call('POST', '/md/challenges', 'opmd', { plan_id: planId, test_type: t, result: 'PASS', context: 'START' });
+    await call('POST', '/md/challenges', 'opmd', { plan_id: planId, test_type: t, result: 'PASS' });
   }
   assert.equal((await call('POST', '/md/start', 'opmd', { plan_id: planId })).status, 201);
   const own = await call('POST', '/md/pallets', 'opmd', { plan_id: planId, location: 'Area Palletizing' });
@@ -142,9 +145,11 @@ test('B-05/B-07: exception Reject menyimpan pallet milik plan yang sama; pallet 
   });
   assert.equal(ok.status, 201, JSON.stringify(ok.data));
   assert.equal(ok.data.item.pallet_id, own.data.item.id);
-  // Reject tidak menambah komposisi pallet (BR-016).
-  const pal = db.prepare('SELECT ok_count FROM pallets WHERE id = ?').get(own.data.item.id);
-  assert.equal(pal.ok_count, 0);
+  // B-09: Reject adalah Bale output yang mengisi slot pallet (slot_count), tetapi tidak masuk komposisi OK.
+  const pal = db.prepare('SELECT slot_count FROM pallets WHERE id = ?').get(own.data.item.id);
+  assert.equal(pal.slot_count, 1);
+  const comp = db.prepare("SELECT COUNT(*) AS n FROM pallet_compositions WHERE pallet_id = ? AND status_category = 'OK'").get(own.data.item.id);
+  assert.equal(comp.n, 0);
 
   // Pallet milik plan lain (plan sudah CLOSED, dibuat langsung di database untuk skenario ini).
   const otherId = db.prepare("SELECT id FROM production_plans WHERE plan_no = 'REG-OEE'").get().id;  // sudah CLOSED
@@ -166,4 +171,77 @@ test('B-10: input sampling_rules/batch_sequence berisi null ditolak 400, bukan e
   assert.equal(a.status, 400);
   const b = await call('POST', '/plans', 'spv', planBody('REG-NULL-2', { batch_sequence: [null] }));
   assert.equal(b.status, 400);
+});
+
+test('B-09: slot_count menghitung semua Bale output (OK + Hold) dan kolom ok_count dimigrasikan', async () => {
+  const planId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE'").get().id;
+  const ok = await call('POST', '/md/pallets', 'opmd', { plan_id: planId, location: 'Area Palletizing' });
+  assert.equal(ok.status, 201);
+  const bale = await call('POST', '/md/bales', 'opmd', { plan_id: planId, pallet_id: ok.data.item.id, batch_code: 'B-2610-001', qty: 2 });
+  assert.equal(bale.status, 201, JSON.stringify(bale.data));
+  assert.equal(db.prepare('SELECT slot_count FROM pallets WHERE id = ?').get(ok.data.item.id).slot_count, 2);
+  // Hold tidak boleh dicampur ke pallet OK (PAL-004); pallet terpisah.
+  const hp = await call('POST', '/md/pallets', 'opmd', { plan_id: planId, location: 'Area Hold' });
+  const hold = await call('POST', '/md/exceptions', 'opmd', { plan_id: planId, category: 'HOLD_OTHER', chamber_code: 'A2', pallet_id: hp.data.item.id });
+  assert.equal(hold.status, 201, JSON.stringify(hold.data));
+  assert.equal(db.prepare('SELECT slot_count FROM pallets WHERE id = ?').get(hp.data.item.id).slot_count, 1);
+  const cols = db.prepare('PRAGMA table_info(pallets)').all().map((c) => c.name);
+  assert.ok(cols.includes('slot_count') && !cols.includes('ok_count'));
+});
+
+test('B-12: konteks challenge MD ditentukan server; setelah STOP menjadi RESTART', async () => {
+  const planId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE'").get().id;
+  const before = await call('POST', '/md/challenges', 'opmd', { plan_id: planId, test_type: 'FE_2_5', result: 'PASS', context: 'RESTART' });
+  assert.equal(before.status, 201, JSON.stringify(before.data));
+  assert.equal(before.data.item.context, 'START');
+  await call('POST', '/md/stop', 'opmd', { plan_id: planId, reason: 'uji' });
+  const after = await call('POST', '/md/challenges', 'opmd', { plan_id: planId, test_type: 'FE_2_5', result: 'PASS' });
+  assert.equal(after.status, 201, JSON.stringify(after.data));
+  assert.equal(after.data.item.context, 'RESTART');
+});
+
+test('B-11: STARTUP_EMPTY menomori trolley menurut urutan masuk; carry-over keluar lalu masuk kembali', async () => {
+  const planId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE'").get().id;
+  const run = await call('POST', '/dryer/runs', 'opdryer', { plan_id: planId, dryer_code: 'DRY-A', run_type: 'STARTUP_EMPTY' });
+  assert.equal(run.status, 201, JSON.stringify(run.data));
+  const rid = run.data.item.id;
+  for (const code of ['TRL-01', 'TRL-02', 'TRL-03']) {
+    assert.equal((await call('POST', `/trolleys/${code}/status`, 'mandor', { status: 'FILLING', batch_code: 'B-2610-001' })).status, 200);
+    assert.equal((await call('POST', `/trolleys/${code}/status`, 'mandor', { status: 'FILLED/READY' })).status, 200);
+  }
+  for (const [comp, code] of [[1, 'TRL-01'], [2, 'TRL-02'], [3, 'TRL-03']]) {
+    const r = await call('POST', `/dryer/runs/${rid}/trolley-in`, 'opdryer', { compartment: comp, trolley_code: code });
+    assert.equal(r.status, 201, JSON.stringify(r.data));
+  }
+  const comp = await call('GET', `/dryer/runs/${rid}/sampling-compliance`, 'opdryer');
+  assert.equal(comp.status, 200, JSON.stringify(comp.data));
+  assert.equal(comp.data.sequence_basis, 'MASUK');
+  assert.equal(comp.data.trolleys_sequenced, 3);
+  // Carry-over keluar tidak mengubah trolley jadi keluar Dryer; trolley tetap IN DRYER.
+  const co = await call('POST', `/dryer/runs/${rid}/carry-over`, 'opdryer', { trolley_code: 'TRL-03' });
+  assert.equal(co.status, 201, JSON.stringify(co.data));
+  assert.equal(db.prepare("SELECT status FROM trolleys WHERE code = 'TRL-03'").get().status, 'IN DRYER');
+  // Masuk kembali ke kompartemen 4 pada papan run yang sama.
+  const ci = await call('POST', `/dryer/runs/${rid}/carry-in`, 'opdryer', { compartment: 4, trolley_code: 'TRL-03' });
+  assert.equal(ci.status, 201, JSON.stringify(ci.data));
+  const board = ci.data.board;
+  assert.equal(board[3].trolley_code, 'TRL-03');
+  assert.equal(board[2].trolley_code, null);
+});
+
+test('B-09 migrasi: database lama (kolom ok_count) dibuka dan kolom diganti slot_count', () => {
+  const file = path.join(os.tmpdir(), `pms-mig-${process.pid}-${Date.now()}.db`);
+  try {
+    let d = openDatabase(file);
+    d.exec('ALTER TABLE pallets RENAME COLUMN slot_count TO ok_count');
+    d.exec("UPDATE pallets SET ok_count = 0");
+    d.close();
+    d = openDatabase(file);
+    const cols = d.prepare('PRAGMA table_info(pallets)').all().map((c) => c.name);
+    assert.ok(cols.includes('slot_count'));
+    assert.ok(!cols.includes('ok_count'));
+    d.close();
+  } finally {
+    for (const f of [file, `${file}-wal`, `${file}-shm`]) fs.rmSync(f, { force: true });
+  }
 });

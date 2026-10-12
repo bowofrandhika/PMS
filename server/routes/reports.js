@@ -177,7 +177,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     const plan = planOf(req.query.plan_id);
     if (!plan) throw badRequest('plan_id wajib');
     const drivers = {
-      PALLET_UNIT: db.prepare("SELECT COUNT(*) AS n FROM pallets WHERE plan_id = ? AND ok_count > 0").get(plan.id).n,
+      PALLET_UNIT: db.prepare("SELECT COUNT(*) AS n FROM pallets WHERE plan_id = ? AND slot_count > 0").get(plan.id).n,
       BALE: db.prepare("SELECT COUNT(*) AS n FROM bale_events WHERE plan_id = ? AND category = 'OK'").get(plan.id).n,
       PRODUCTION_DAY: db.prepare('SELECT COUNT(DISTINCT shift_date) AS n FROM shifts WHERE plan_id = ?').get(plan.id).n,
       DRYER_RUN: db.prepare('SELECT COUNT(*) AS n FROM dryer_runs WHERE plan_id = ?').get(plan.id).n,
@@ -275,7 +275,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     },
     pallets: {
       title: 'Pallet',
-      sql: `SELECT id, plan_id, manual_no, forming_box_code, status, status_category, location, ok_count, max_bale, created_by, created_at, closed_at
+      sql: `SELECT id, plan_id, manual_no, forming_box_code, status, status_category, location, slot_count, max_bale, created_by, created_at, closed_at
         FROM pallets WHERE (? IS NULL OR plan_id = ?) AND date(created_at) BETWEEN ? AND ? ORDER BY id`,
     },
     cutoffs: {

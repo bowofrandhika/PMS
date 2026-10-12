@@ -19,17 +19,33 @@ function buildRouter(db, { requireAuth, requirePerm, setTrolleyStatus, loadPlan 
     if (run.status === 'CLOSED') throw conflict('Dryer Run sudah CLOSED');
   };
 
-  // Posisi kompartemen dihitung dari urutan event TROLLEY_IN/TROLLEY_OUT (sumber kebenaran event).
+  // Posisi kompartemen dihitung dari event board (sumber kebenaran event).
+  // TROLLEY_IN / CARRY_IN = trolley masuk papan; TROLLEY_OUT / CARRY_OUT = trolley keluar papan.
+  // CARRY_* hanya memindahkan trolley WIP antar-run; tidak dihitung sebagai keluar Dryer (BR-022).
+  const BOARD_IN = ['TROLLEY_IN', 'CARRY_IN'];
+  const BOARD_OUT = ['TROLLEY_OUT', 'CARRY_OUT'];
   function boardState(run) {
     const slots = Array.from({ length: compartments }, (_, i) => ({ compartment: i + 1, trolley_code: null, since: null }));
-    const events = db.prepare("SELECT * FROM dryer_events WHERE run_id = ? AND kind IN ('TROLLEY_IN','TROLLEY_OUT') ORDER BY id").all(run.id);
+    const events = db.prepare("SELECT * FROM dryer_events WHERE run_id = ? AND kind IN ('TROLLEY_IN','TROLLEY_OUT','CARRY_IN','CARRY_OUT') ORDER BY id").all(run.id);
     for (const e of events) {
       const slot = slots[e.compartment - 1];
       if (!slot) continue;
-      if (e.kind === 'TROLLEY_IN') { slot.trolley_code = e.trolley_code; slot.since = e.at; }
-      else { slot.trolley_code = null; slot.since = null; }
+      if (BOARD_IN.includes(e.kind)) { slot.trolley_code = e.trolley_code; slot.since = e.at; }
+      else if (BOARD_OUT.includes(e.kind)) { slot.trolley_code = null; slot.since = null; }
     }
     return slots;
+  }
+
+  // Nomor urut trolley (B-11), dibedakan menurut jenis run:
+  // - STARTUP_EMPTY (mulai kosong, tanpa WIP): urutan MASUK (TROLLEY_IN pertama per trolley).
+  // - STEADY_WIP (mulai dengan WIP di dalam): urutan KELUAR (TROLLEY_OUT pertama per trolley).
+  // Trolley WIP hasil carry-in tidak mendapat urutan masuk pada run tersebut.
+  function trolleySequence(run) {
+    const kind = run.run_type === 'STEADY_WIP' ? 'TROLLEY_OUT' : 'TROLLEY_IN';
+    const rows = db.prepare('SELECT trolley_code FROM dryer_events WHERE run_id = ? AND kind = ? ORDER BY id').all(run.id, kind);
+    const seq = new Map();
+    for (const r of rows) if (!seq.has(r.trolley_code)) seq.set(r.trolley_code, seq.size + 1);
+    return seq;
   }
 
   // Timer ON = akumulasi interval RUNNING (START/RESTART sampai STOP). Interval terbuka dihitung sampai sekarang.
@@ -176,8 +192,33 @@ function buildRouter(db, { requireAuth, requirePerm, setTrolleyStatus, loadPlan 
     const code = requireString(b, 'trolley_code', { max: 40 });
     const onBoard = boardState(run).some((s) => s.trolley_code === code);
     if (!onBoard) throw conflict(`Trolley ${code} tidak berada di Dryer ${run.dryer_code}`);
-    logRunEvent(run, req.user, 'CARRY_OVER', { trolley_code: code, remark: b.remark || 'Carry-over ke shift berikut (tidak dihitung ulang sebagai output, BR-022)' });
-    res.status(201).json({ ok: true });
+    // Trolley tetap IN DRYER; hanya dilepas dari papan run ini agar run dapat ditutup. Bukan keluar Dryer.
+    const slot = boardState(run).find((x) => x.trolley_code === code);
+    logRunEvent(run, req.user, 'CARRY_OUT', { trolley_code: code, compartment: slot.compartment, remark: b.remark || 'Carry-over ke run/shift berikut (tidak dihitung ulang sebagai output, BR-022)' });
+    audit(db, req.user, { action: 'CREATE', entity: 'dryer_events', recordId: run.id, newValue: { kind: 'CARRY_OUT', trolley: code } });
+    res.status(201).json({ ok: true, board: boardState(run) });
+  });
+
+  // Trolley WIP dari run sebelumnya dimasukkan kembali ke papan run ini (CARRY_IN).
+  r.post('/dryer/runs/:id/carry-in', requireAuth, requirePerm('dryer.write'), (req, res) => {
+    const run = loadRun(Number(req.params.id));
+    if (run.status !== 'RUNNING') throw conflict('Dryer harus RUNNING untuk memasukkan carry-over ke papan');
+    const b = req.body || {};
+    const comp = requireNumber(b, 'compartment', { integer: true, min: 1, max: compartments });
+    const code = requireString(b, 'trolley_code', { max: 40 });
+    if (boardState(run)[comp - 1].trolley_code) throw conflict(`Kompartemen ${comp} masih terisi`);
+    const trolley = db.prepare('SELECT * FROM trolleys WHERE code = ?').get(code);
+    if (!trolley) throw badRequest(`Trolley tidak ditemukan: ${code}`);
+    if (trolley.status !== 'IN DRYER') throw conflict(`Trolley ${code} berstatus ${trolley.status}; carry-in hanya untuk trolley IN DRYER`);
+    // Trolley tidak boleh masih berada di papan run lain yang terbuka.
+    const otherOpen = db.prepare("SELECT * FROM dryer_runs WHERE dryer_code = ? AND id != ? AND status IN ('RUNNING','STOPPED')").all(run.dryer_code, run.id);
+    for (const o of otherOpen) {
+      if (boardState(o).some((x) => x.trolley_code === code)) throw conflict(`Trolley ${code} masih di papan Dryer Run #${o.id}. Lakukan carry-over dari run tersebut terlebih dahulu.`);
+    }
+    const at = optionalTime(b, 'at');
+    logRunEvent(run, req.user, 'CARRY_IN', { compartment: comp, trolley_code: code, at, remark: 'Carry-over masuk dari run sebelumnya' });
+    audit(db, req.user, { action: 'CREATE', entity: 'dryer_events', recordId: run.id, newValue: { kind: 'CARRY_IN', compartment: comp, trolley: code } });
+    res.status(201).json({ board: boardState(run) });
   });
 
   r.post('/dryer/runs/:id/close', requireAuth, requirePerm('dryer.write'), (req, res) => {
@@ -204,9 +245,9 @@ function buildRouter(db, { requireAuth, requirePerm, setTrolleyStatus, loadPlan 
     const adHoc = !!b.ad_hoc;
     const reason = b.reason ? String(b.reason).slice(0, 300) : null;
     if (adHoc && !reason) throw badRequest('Sampling AD HOC wajib menyertakan alasan (adjustment/abnormality)');
-    const seqOf = db.prepare("SELECT MIN(id) AS first_in FROM dryer_events WHERE run_id = ? AND kind = 'TROLLEY_IN' AND trolley_code = ?").get(run.id, code);
-    if (!seqOf.first_in) throw conflict(`Trolley ${code} belum pernah masuk Dryer Run ini`);
-    const trolleySeq = db.prepare("SELECT COUNT(*) AS n FROM dryer_events WHERE run_id = ? AND kind = 'TROLLEY_IN' AND id <= ?").get(run.id, seqOf.first_in).n;
+    const entered = db.prepare("SELECT id FROM dryer_events WHERE run_id = ? AND kind IN ('TROLLEY_IN','CARRY_IN') AND trolley_code = ? LIMIT 1").get(run.id, code);
+    if (!entered) throw conflict(`Trolley ${code} belum pernah masuk Dryer Run ini`);
+    const trolleySeq = trolleySequence(run).get(code) ?? null;
     if (b.planned_at && !isIsoDateTime(b.planned_at)) throw badRequest('planned_at harus berupa tanggal/waktu ISO 8601');
     const planned = b.planned_at ? new Date(b.planned_at).toISOString() : null;
     const actual = optionalTime(b, 'actual_at');
@@ -227,8 +268,9 @@ function buildRouter(db, { requireAuth, requirePerm, setTrolleyStatus, loadPlan 
     const samples = db.prepare('SELECT * FROM cake_samples WHERE run_id = ?').all(run.id);
     const planned = samples.filter((s) => !s.ad_hoc);
     const adHoc = samples.filter((s) => s.ad_hoc).length;
-    const trolleysIn = db.prepare("SELECT DISTINCT trolley_code FROM dryer_events WHERE run_id = ? AND kind = 'TROLLEY_IN' ORDER BY id").all(run.id).map((x) => x.trolley_code);
-    const trolleyCount = trolleysIn.length;
+    const entered = db.prepare("SELECT DISTINCT trolley_code FROM dryer_events WHERE run_id = ? AND kind IN ('TROLLEY_IN','CARRY_IN')").all(run.id).map((x) => x.trolley_code);
+    const seqMap = trolleySequence(run);
+    const sequenced = seqMap.size;
     const results = (plan.sampling_rules || []).map((rule) => {
       if (rule.type === 'TIME_INTERVAL') {
         const intervalMs = rule.interval_min * 60000;
@@ -238,24 +280,28 @@ function buildRouter(db, { requireAuth, requirePerm, setTrolleyStatus, loadPlan 
         return { type: rule.type, detail: `setiap ${rule.interval_min} menit`, due, done, status: done >= due ? 'ON_TRACK' : 'OVERDUE' };
       }
       if (rule.type === 'TROLLEY_INTERVAL') {
-        const due = Math.floor(trolleyCount / rule.n);
-        const doneSeq = new Set(planned.filter((s) => s.trolley_seq && s.trolley_seq % rule.n === 0).map((s) => s.trolley_seq));
-        return { type: rule.type, detail: `setiap ${rule.n} trolley`, due, done: doneSeq.size, status: doneSeq.size >= due ? 'ON_TRACK' : 'OVERDUE' };
+        // Trolley ke-N mengikuti basis nomor urut run (STARTUP_EMPTY = masuk, STEADY_WIP = keluar).
+        const due = Math.floor(sequenced / rule.n);
+        const doneSeq = new Set(planned.map((s) => seqMap.get(s.trolley_code)).filter((q) => q && q % rule.n === 0));
+        return { type: rule.type, detail: `setiap ${rule.n} trolley (urutan ${run.run_type === 'STEADY_WIP' ? 'keluar' : 'masuk'})`, due, done: doneSeq.size, status: doneSeq.size >= due ? 'ON_TRACK' : 'OVERDUE' };
       }
       if (rule.type === 'SPECIFIC_TROLLEY') {
         const done = new Set(planned.map((s) => s.trolley_code));
-        const missing = rule.trolleys.filter((t) => trolleysIn.includes(t) && !done.has(t));
-        return { type: rule.type, detail: `trolley ${rule.trolleys.join(', ')}`, due: rule.trolleys.filter((t) => trolleysIn.includes(t)).length, done: rule.trolleys.filter((t) => done.has(t)).length, status: missing.length ? 'OVERDUE' : 'ON_TRACK', missing };
+        const missing = rule.trolleys.filter((t) => entered.includes(t) && !done.has(t));
+        return { type: rule.type, detail: `trolley ${rule.trolleys.join(', ')}`, due: rule.trolleys.filter((t) => entered.includes(t)).length, done: rule.trolleys.filter((t) => done.has(t)).length, status: missing.length ? 'OVERDUE' : 'ON_TRACK', missing };
       }
       // RANDOM
       return { type: rule.type, detail: `target ${rule.target} sampel`, due: rule.target, done: planned.length, status: planned.length >= rule.target ? 'ON_TRACK' : 'PENDING' };
     });
     res.json({
       run_id: run.id,
+      run_type: run.run_type,
+      sequence_basis: run.run_type === 'STEADY_WIP' ? 'KELUAR' : 'MASUK',
       rules: results,
       ad_hoc_count: adHoc,
-      trolleys_in: trolleyCount,
-      note: 'Compliance dihitung berdasarkan rule pada Production Plan aktif. Sampling AD HOC dicatat terpisah dengan alasan.',
+      trolleys_in: entered.length,
+      trolleys_sequenced: sequenced,
+      note: 'Compliance dihitung berdasarkan rule pada Production Plan aktif. Nomor urut trolley: STARTUP_EMPTY = urutan masuk; STEADY_WIP = urutan keluar. Sampling AD HOC dicatat terpisah dengan alasan.',
     });
   });
 

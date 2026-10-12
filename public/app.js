@@ -261,9 +261,10 @@
     reading: { submit: (b) => api('POST', `/dryer/runs/${S.runId}/readings`, b).then(() => ({ msg: 'Pembacaan tercatat.' })) },
     sample: { submit: (b) => api('POST', `/dryer/runs/${S.runId}/samples`, { ...b, ad_hoc: !!b.ad_hoc }).then(() => ({ msg: 'Sampling Cake tercatat.' })) },
     carryOver: { submit: (b) => api('POST', `/dryer/runs/${S.runId}/carry-over`, b).then(() => ({ msg: 'Carry-over dicatat.' })) },
+    carryIn: { submit: (b) => api('POST', `/dryer/runs/${S.runId}/carry-in`, { ...b, compartment: Number(b.compartment) }).then(() => ({ msg: 'Carry-over masuk ke papan.' })) },
     adjRequest: { submit: (b) => api('POST', `/plans/${S.planId}/adjustments`, { ...b, run_id: S.runId || undefined }).then(() => ({ msg: 'Instruksi Process Adjustment dibuat (REQUESTED).' })) },
     challenge: { submit: (b) => api('POST', '/md/challenges', { ...b, plan_id: S.planId }).then(() => ({ msg: 'Challenge tercatat.' })) },
-    bale: { submit: (b) => api('POST', '/md/bales', { ...b, plan_id: S.planId, pallet_id: S.palletId || undefined }).then((r) => ({ msg: `Count Bale OK +${r.qty} (Pallet #${r.pallet.id}: ${r.pallet.ok_count}/${r.pallet.max_bale}).` })) },
+    bale: { submit: (b) => api('POST', '/md/bales', { ...b, plan_id: S.planId, pallet_id: S.palletId || undefined }).then((r) => ({ msg: `Count Bale OK +${r.qty} (Pallet #${r.pallet.id}: ${r.pallet.slot_count}/${r.pallet.max_bale}).` })) },
     exception: { submit: (b) => api('POST', '/md/exceptions', { ...b, plan_id: S.planId, pallet_id: S.palletId || undefined }).then(() => ({ msg: 'Exception Reject/Hold tercatat.' })) },
     palletNew: { submit: (b) => api('POST', '/md/pallets', { ...b, plan_id: S.planId }).then((r) => { S.palletId = r.item.id; return { msg: `Pallet #${r.item.id} dibuat.` }; }) },
     cutoffNew: { submit: (b) => api('POST', '/md/cutoffs', { ...b, plan_id: S.planId }).then((r) => ({ msg: r.note || 'Request Batch Cutoff dibuat.' })) },
@@ -486,8 +487,10 @@
             ${field('reason', 'Alasan (wajib jika AD HOC)')}
             <button class="btn" type="submit">Catat sampel</button></form></div>` : ''}
         ${S.cache.lastResult && S.cache.lastResult.url.includes('sampling-compliance') && S.cache.lastResult.url.includes(`/runs/${run.id}/`) ? `<h2>Compliance sampling</h2>${json(S.cache.lastResult.res)}` : ''}
-        ${!closed && has('dryer.write') ? `<div class="card"><b>Carry-over</b>
-          <form class="inline" data-form="carryOver">${field('trolley_code', 'Trolley', { required: true })}${field('remark', 'Catatan')}<button class="btn" type="submit">Catat carry-over</button></form></div>` : ''}
+        ${!closed && has('dryer.write') ? `<div class="card"><b>Carry-over keluar</b> <span class="muted">(trolley WIP dilepas dari papan run ini, tetap IN DRYER)</span>
+          <form class="inline" data-form="carryOver">${field('trolley_code', 'Trolley', { required: true })}${field('remark', 'Catatan')}<button class="btn" type="submit">Catat carry-over</button></form></div>
+        <div class="card"><b>Carry-over masuk</b> <span class="muted">(trolley WIP dari run sebelumnya ditempatkan di kompartemen)</span>
+          <form class="inline" data-form="carryIn">${field('compartment', 'Kompartemen', { type: 'num', required: true, value: 1 })}${field('trolley_code', 'Trolley', { required: true })}<button class="btn" type="submit">Masukkan ke papan</button></form></div>` : ''}
         <h2>Process Adjustment</h2>
         ${has('adjustment.request') && !closed ? `<div class="card"><form class="inline" data-form="adjRequest">
           ${field('instruction', 'Instruksi', { required: true })}${field('trigger_reason', 'Pemicu')}${field('before_setting', 'Sebelum')}${field('after_setting', 'Sesudah')}
@@ -531,7 +534,6 @@
         ${has('md.challenge') ? `<form class="inline" data-form="challenge">
           ${field('test_type', 'Uji', { select: ['FE_2_5', 'NONFE_2_5', 'SS_2_5'] })}
           ${field('result', 'Hasil', { select: ['PASS', 'FAIL'] })}
-          ${field('context', 'Konteks', { select: ['START', 'RESTART'] })}
           <button class="btn" type="submit">Catat challenge</button></form>` : ''}
         <div style="margin-top:8px;display:flex;gap:8px">
           ${has('md.run') && !st.running ? `<button class="btn" data-api="POST|/md/start" data-body='${JSON.stringify({ plan_id: S.planId })}' data-ok="MD dimulai.">Start MD</button>` : ''}
@@ -552,7 +554,7 @@
       ${has('pallet.write') ? `<form class="inline card" data-form="palletNew">${field('manual_no', 'No. manual (opsional)')}${field('location', 'Lokasi', { value: 'Area Palletizing' })}<button class="btn" type="submit">Buat pallet baru</button></form>` : ''}
       ${table(['ID', 'Manual', 'Status', 'Kategori', 'Isi / Max', 'Lokasi', 'komposisi', 'Aksi'], pal.items.map((p) => tr([
         `<button class="link" data-act="select" data-key="pallet" data-id="${p.id}">#${p.id}</button>`, esc(p.manual_no ?? '—'), `<span class="badge ${statusCls(p.status)}">${esc(p.status)}</span>`, esc(p.status_category ?? '—'),
-        `${fmt(p.ok_count)} / ${fmt(p.max_bale)}`, esc(p.location ?? ''), esc(p.compositions.map((c) => `${c.batch_code}/${c.status_category}: ${c.qty}`).join('; ')),
+        `${fmt(p.slot_count)} / ${fmt(p.max_bale)}`, esc(p.location ?? ''), esc(p.compositions.map((c) => `${c.batch_code}/${c.status_category}: ${c.qty}`).join('; ')),
         [has('pallet.write') && ['OPEN', 'PARTIAL', 'FULL', 'HOLD/REJECT'].includes(p.status) ? `<button class="btn sec" data-api="POST|/md/pallets/:id/close" data-id="${p.id}" data-ok="Pallet ditutup.">Tutup</button>` : '',
          has('movement.write') && ['OPEN', 'PARTIAL', 'FULL'].includes(p.status) ? `<button class="btn" data-api="POST|/md/pallets/:id/move" data-id="${p.id}" data-prompt="Lokasi tujuan:" data-field="to_loc" data-default="Gudang FG" data-ok="Pallet dipindah.">Pindah</button>` : ''].join(' ')]))) }
       <p class="muted" style="font-size:12px">Maksimal ${pal.max_bale} Bale per pallet (Pallet Unit = alas + 1 Forming Box). Pallet PARTIAL dilanjutkan shift berikut.</p>

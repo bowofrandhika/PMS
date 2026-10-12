@@ -357,7 +357,7 @@ CREATE TABLE IF NOT EXISTS pallets (
   forming_box_code TEXT,
   status TEXT NOT NULL DEFAULT 'OPEN',   -- OPEN | PARTIAL | FULL | MOVED | HOLD/REJECT | RELEASED | SHIPPED
   location TEXT,
-  ok_count INTEGER NOT NULL DEFAULT 0,   -- Bale yang mengisi slot pallet (OK + Hold)
+  slot_count INTEGER NOT NULL DEFAULT 0,   -- Bale yang mengisi slot pallet (OK + Hold)
   max_bale INTEGER NOT NULL DEFAULT 36,
   status_category TEXT,                  -- OK | HOLD_METAL | HOLD_CONTAMINATION | HOLD_WS | HOLD_OTHER
   created_at TEXT NOT NULL,
@@ -594,12 +594,22 @@ function seedSettings(db) {
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) ins.run(k, v);
 }
 
+// Migrasi ringan untuk database yang dibuat sebelum perubahan skema.
+// ok_count -> slot_count: kolom ini menghitung Bale yang mengisi slot pallet (OK + Hold), bukan OK saja.
+function migrate(db) {
+  const cols = db.prepare('PRAGMA table_info(pallets)').all().map((c) => c.name);
+  if (cols.includes('ok_count') && !cols.includes('slot_count')) {
+    db.exec('ALTER TABLE pallets RENAME COLUMN ok_count TO slot_count');
+  }
+}
+
 function openDatabase(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys = ON;');
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  migrate(db);
   seedRbac(db);
   seedSettings(db);
   seedMasterData(db);

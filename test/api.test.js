@@ -200,7 +200,7 @@ test('MD: challenge wajib PASS sebelum start; count Bale; exception wajib chambe
 
   const bale = await call('POST', '/md/bales', 'opmd', { plan_id: planId, qty: 3 });
   assert.equal(bale.status, 201, JSON.stringify(bale.data));
-  assert.equal(bale.data.pallet.ok_count, 3);
+  assert.equal(bale.data.pallet.slot_count, 3);
   assert.equal(bale.data.batch, 'B-2610-001');
 
   const noChamber = await call('POST', '/md/exceptions', 'opmd', { plan_id: planId, category: 'REJECT_METAL', metal_type: 'FE' });
@@ -214,9 +214,9 @@ test('MD: challenge wajib PASS sebelum start; count Bale; exception wajib chambe
   const okPal = pals.data.items[0];
   const holdPal = pals.data.items[1];
   assert.equal(okPal.status_category, 'OK');
-  assert.equal(okPal.ok_count, 3, 'Reject tidak mengisi slot pallet');
+  assert.equal(okPal.slot_count, 3, 'Reject tidak mengisi slot pallet');
   assert.equal(holdPal.status, 'HOLD/REJECT', 'Hold dipisah ke pallet sendiri (mixed status dilarang)');
-  assert.equal(holdPal.ok_count, 1, 'Hold mengisi slot pallet');
+  assert.equal(holdPal.slot_count, 1, 'Hold mengisi slot pallet');
   assert.equal(holdPal.status_category, 'HOLD_WS');
   const more = await call('POST', '/md/bales', 'opmd', { plan_id: planId, qty: 1 });
   assert.equal(more.status, 201, 'Bale OK berikutnya tetap masuk pallet OK, bukan pallet Hold');

@@ -69,7 +69,9 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     requireActivePlan(plan);
     const test = requireEnum(b, 'test_type', CHALLENGE_TESTS);
     const result = requireEnum(b, 'result', ['PASS', 'FAIL']);
-    const context = requireEnum(b, 'context', ['START', 'RESTART']);
+    // Konteks ditentukan server, bukan pilihan operator (B-12): challenge setelah ada STOP adalah RESTART.
+    const hadStop = db.prepare('SELECT id FROM md_sessions WHERE plan_id = ? AND stopped_at IS NOT NULL LIMIT 1').get(plan.id);
+    const context = hadStop ? 'RESTART' : 'START';
     const at = nowIso();
     const info = db.prepare('INSERT INTO md_challenges (plan_id, test_type, result, context, at, by) VALUES (?, ?, ?, ?, ?, ?)')
       .run(plan.id, test, result, context, at, req.user.username);
@@ -158,7 +160,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     const hasHold = db.prepare("SELECT COUNT(*) AS n FROM pallet_compositions WHERE pallet_id = ? AND status_category != 'OK' AND qty > 0").get(p.id).n > 0;
     let status;
     if (hasHold) status = 'HOLD/REJECT';
-    else if (p.ok_count >= p.max_bale) status = 'FULL';
+    else if (p.slot_count >= p.max_bale) status = 'FULL';
     else status = 'PARTIAL';
     db.prepare('UPDATE pallets SET status = ?, closed_at = ? WHERE id = ?').run(status, nowIso(), p.id);
     audit(db, req.user, { action: 'UPDATE', entity: 'pallets', recordId: p.id, oldValue: { status: p.status }, newValue: { status } });
@@ -196,8 +198,8 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     let pallet = b.pallet_id ? loadPalletOfPlan(Number(b.pallet_id), plan) : currentPallet(plan, 'OK');
     if (!pallet) pallet = createPallet(plan, req.user, { location: 'Area Palletizing' });
     if (!['OPEN', 'PARTIAL'].includes(pallet.status)) throw conflict(`Pallet ${pallet.id} berstatus ${pallet.status}; buat pallet baru`);
-    if (pallet.ok_count + qty > pallet.max_bale) {
-      throw conflict(`Pallet penuh/melebihi kapasitas ${pallet.max_bale} Bale (sisa ${pallet.max_bale - pallet.ok_count}). Bale berikutnya diblokir sebelum pallet ditutup (PAL-001).`);
+    if (pallet.slot_count + qty > pallet.max_bale) {
+      throw conflict(`Pallet penuh/melebihi kapasitas ${pallet.max_bale} Bale (sisa ${pallet.max_bale - pallet.slot_count}). Bale berikutnya diblokir sebelum pallet ditutup (PAL-001).`);
     }
     if (pallet.status_category && pallet.status_category !== 'OK') {
       throw conflict(`Pallet ${pallet.id} berstatus ${pallet.status_category}; mixed status tidak diizinkan (PAL-004)`);
@@ -207,9 +209,9 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
       .run(plan.id, pallet.id, batch, qty, pallet.location, at, req.user.username);
     db.prepare(`INSERT INTO pallet_compositions (pallet_id, batch_code, qty, status_category) VALUES (?, ?, ?, 'OK')
       ON CONFLICT(pallet_id, batch_code, status_category) DO UPDATE SET qty = qty + excluded.qty`).run(pallet.id, batch, qty);
-    const newCount = pallet.ok_count + qty;
+    const newCount = pallet.slot_count + qty;
     const newStatus = newCount >= pallet.max_bale ? 'FULL' : (pallet.status === 'PARTIAL' ? 'PARTIAL' : 'OPEN');
-    db.prepare('UPDATE pallets SET ok_count = ?, status = ?, status_category = ? WHERE id = ?').run(newCount, newStatus, 'OK', pallet.id);
+    db.prepare('UPDATE pallets SET slot_count = ?, status = ?, status_category = ? WHERE id = ?').run(newCount, newStatus, 'OK', pallet.id);
     audit(db, req.user, { action: 'CREATE', entity: 'bale_events', recordId: pallet.id, newValue: { batch, qty, category: 'OK' } });
     res.status(201).json({ pallet: loadPallet(pallet.id), batch, qty, note: 'Count normal tanpa detail per Bale (MD-002).' });
   });
@@ -228,34 +230,30 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     const isReject = category.startsWith('REJECT');
     const location = isReject ? 'Area Reject (segregasi)' : (b.location ? String(b.location).slice(0, 120) : 'Area Hold');
 
+    // B-09: setiap Bale output (Reject maupun Hold) yang ditempatkan ke pallet mengisi slot pallet (slot_count)
+    // dan memakai aturan pallet yang sama (kapasitas, tanpa mixed status). Reject tanpa pallet tetap tidak dipalletkan.
     let pallet = null;
-    let rejectPalletId = null;
-    if (isReject && b.pallet_id) {
-      // MD-003: exception menyimpan pallet. Reject tidak mengisi slot pallet OK dan tidak menambah komposisi (BR-016).
-      rejectPalletId = loadPalletOfPlan(Number(b.pallet_id), plan).id;
-    }
-    if (!isReject) {
-      // Hold tetap mengisi slot pallet (PAL-005) dengan composition status Hold.
+    if (!isReject || b.pallet_id) {
       pallet = b.pallet_id ? loadPalletOfPlan(Number(b.pallet_id), plan) : currentPallet(plan, category);
-      if (!pallet) pallet = createPallet(plan, req.user, { location: 'Area Hold' });
+      if (!pallet) pallet = createPallet(plan, req.user, { location: isReject ? 'Area Reject (segregasi)' : 'Area Hold' });
       if (!['OPEN', 'PARTIAL', 'HOLD/REJECT'].includes(pallet.status)) throw conflict(`Pallet ${pallet.id} berstatus ${pallet.status}`);
       if (pallet.status === 'HOLD/REJECT' && pallet.status_category !== category && pallet.status_category !== null) {
         throw conflict(`Pallet ${pallet.id} berisi Hold ${pallet.status_category}; buat pallet terpisah untuk ${category}`);
       }
-      if (pallet.ok_count + 1 > pallet.max_bale) throw conflict(`Pallet ${pallet.id} sudah penuh (${pallet.max_bale} Bale)`);
+      if (pallet.slot_count + 1 > pallet.max_bale) throw conflict(`Pallet ${pallet.id} sudah penuh (${pallet.max_bale} Bale)`);
       if (pallet.status_category && pallet.status_category !== category) {
         throw conflict(`Pallet ${pallet.id} berstatus ${pallet.status_category}; mixed status ${category} diblokir (PAL-004)`);
       }
     }
 
     const info = db.prepare(`INSERT INTO bale_events (plan_id, pallet_id, batch_code, category, gross_qty, reject_qty, chamber_code, metal_type, location, remark, at, by)
-      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`).run(plan.id, pallet ? pallet.id : rejectPalletId, batch, category, isReject ? 1 : 0,
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`).run(plan.id, pallet ? pallet.id : null, batch, category, isReject ? 1 : 0,
       chamber, metal, location, b.remark || null, at, req.user.username);
     const eventId = Number(info.lastInsertRowid);
     if (pallet) {
       db.prepare(`INSERT INTO pallet_compositions (pallet_id, batch_code, qty, status_category) VALUES (?, ?, 1, ?)
         ON CONFLICT(pallet_id, batch_code, status_category) DO UPDATE SET qty = qty + 1`).run(pallet.id, batch, category);
-      db.prepare("UPDATE pallets SET ok_count = ok_count + 1, status_category = ?, status = 'HOLD/REJECT' WHERE id = ?").run(category, pallet.id);
+      db.prepare("UPDATE pallets SET slot_count = slot_count + 1, status_category = ?, status = 'HOLD/REJECT' WHERE id = ?").run(category, pallet.id);
     }
     db.prepare('INSERT INTO quality_exceptions (bale_event_id) VALUES (?)').run(eventId);
     const created = db.prepare('SELECT * FROM bale_events WHERE id = ?').get(eventId);
