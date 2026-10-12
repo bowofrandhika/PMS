@@ -333,7 +333,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
 header{display:flex;align-items:center;gap:12px;border-bottom:2px solid #1b5e8c;padding-bottom:6px;margin-bottom:10px}
 header img{height:42px}h1{font-size:13pt;margin:0}table{border-collapse:collapse;width:100%}th,td{border:1px solid #9bb;padding:3px 4px;text-align:left;vertical-align:top}
 th{background:#e6f0f7}.meta{font-size:8pt;color:#456;margin-bottom:6px}</style></head><body>
-<header><img src="/logo.svg" alt="PBS"><div><h1>${esc(rep.title)}</h1><div class="meta">PT Potensi Bumi Sakti · Periode ${esc(from)} s/d ${esc(to)} · Dicetak oleh ${esc(req.user.username)} · ${esc(nowIso())} · ${rows.length} baris</div></div></header>
+<header><img src="/logo.svg?v=5" alt="PBS"><div><h1>${esc(rep.title)}</h1><div class="meta">PT Potensi Bumi Sakti · Periode ${esc(from)} s/d ${esc(to)} · Dicetak oleh ${esc(req.user.username)} · ${esc(nowIso())} · ${rows.length} baris</div></div></header>
 <table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
 <script>window.addEventListener('load',()=>window.print());</script></body></html>`);
     }

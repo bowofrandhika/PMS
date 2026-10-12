@@ -101,13 +101,16 @@
     const flashHtml = S.flash ? `<div class="msg ${S.flash.kind === 'err' ? 'err' : S.flash.kind === 'info' ? 'info' : 'ok'}">${esc(S.flash.text)}</div>` : '';
     return `
       <header class="top">
-        <img class="logo" src="/logo.svg" alt="PT Potensi Bumi Sakti">
-        <div><div style="font-weight:700;color:#0f3d66">Production Management System</div><div class="muted" style="font-size:12px">Kebutuhan Developer Aplikasi Produksi Kering · Rev 2.0</div></div>
+        <img class="logo" src="/logo.svg?v=5" alt="PT Potensi Bumi Sakti">
+        <div>
+          <div class="brand-title">Production Management System</div>
+          <div class="brand-sub">PT Potensi Bumi Sakti · Produksi Kering</div>
+        </div>
         <div class="grow"></div>
         <label>Production Plan aktif
           <select data-act="setPlan">${S.plans.length ? planOpts : '<option value="">(belum ada plan)</option>'}</select>
         </label>
-        <div class="muted" style="font-size:12px">${esc(S.me.fullName)} · ${esc(S.me.roles.join(', '))}</div>
+        <div class="who"><b>${esc(S.me.fullName)}</b><br>${esc(S.me.roles.join(', '))}</div>
         <button class="btn sec" data-act="logout">Keluar</button>
       </header>
       <nav class="tabs">${visible.map((t) => `<button data-act="tab" data-id="${t.id}" class="${t.id === S.tab ? 'active' : ''}">${esc(t.label)}</button>`).join('')}</nav>
@@ -115,17 +118,18 @@
   }
 
   function loginView() {
-    return `<div class="login">
-      <img src="/logo.svg" alt="PT Potensi Bumi Sakti">
-      <h1 style="font-size:16px">Production Management System</h1>
+    return `<div class="login-wrap"><div class="login">
+      <img src="/logo.svg?v=5" alt="PT Potensi Bumi Sakti">
+      <div class="login-title">Production Management System</div>
+      <div class="login-sub">PT Potensi Bumi Sakti · Produksi Kering</div>
       <form data-form="login">
         <label>Username<input name="username" autocomplete="username" required></label>
         <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
         <button class="btn" type="submit">Masuk</button>
       </form>
       ${S.flash ? `<div class="msg err">${esc(S.flash.text)}</div>` : ''}
-      <p class="muted" style="font-size:12px">Akun individual. Timestamp server: Asia/Jakarta.</p>
-    </div>`;
+      <p class="muted" style="font-size:12px;margin:18px 0 0">Akun individual · Zona waktu Asia/Jakarta</p>
+    </div></div>`;
   }
 
   async function render() {
