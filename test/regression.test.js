@@ -442,3 +442,25 @@ test('Edit: plan DRAFT dan WO diubah SPV; operator ditolak; plan non-DRAFT tidak
   assert.equal(wu.data.item.target_kg, 15000);
   assert.equal((await call('PATCH', `/work-orders/${w.data.item.id}`, 'opmd', { buyer: 'X' })).status, 403);
 });
+
+test('Riwayat: SPV boleh melihat; operator ditolak; pencarian, paginasi, dan riwayat per data', async () => {
+  const { ROLES } = require('../server/rbac');
+  assert.equal(ROLES.AUDITOR, undefined, 'peran AUDITOR sudah dihapus');
+  const c = await call('POST', '/plans', 'spv', planBody('HIST-1', { target_bale: 10 }));
+  const id = c.data.item.id;
+  const del = await call('DELETE', `/plans/${id}`, 'spv', { reason: 'uji riwayat' });
+  assert.equal(del.status, 200);
+  const spvList = await call('GET', '/deleted-records?limit=1&page=1', 'spv');
+  assert.equal(spvList.status, 200);
+  assert.equal(spvList.data.items.length, 1);
+  assert.equal(spvList.data.limit, 1);
+  assert.ok(spvList.data.pages >= 1);
+  assert.equal((await call('GET', '/deleted-records', 'opdryer')).status, 403);
+  const srch = await call('GET', '/deleted-records?q=' + encodeURIComponent('uji riwayat'), 'spv');
+  assert.ok(srch.data.items.some((x) => x.record_id === id));
+  const h = await call('GET', `/history?entity=production_plans&record_id=${id}`, 'spv');
+  assert.equal(h.status, 200);
+  assert.equal(h.data.deleted.length, 1);
+  assert.ok(h.data.audit.some((x) => x.action === 'CREATE'));
+  assert.equal((await call('GET', '/history?entity=production_plans', 'spv')).status, 400);
+});

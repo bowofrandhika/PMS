@@ -35,7 +35,7 @@ before(async () => {
   server = app.listen(0, '127.0.0.1');
   await new Promise((r) => server.once('listening', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  for (const u of ['spv', 'spv2', 'mandor', 'opdryer', 'opmd', 'qc', 'manager', 'auditor', 'admin']) await login(u);
+  for (const u of ['spv', 'spv2', 'mandor', 'opdryer', 'opmd', 'qc', 'manager', 'direktur', 'admin']) await login(u);
 });
 
 after(() => { if (server) server.close(); if (db) db.close(); });
@@ -312,7 +312,7 @@ test('Laporan: CSV kompatibel Excel (BOM), halaman print A4, audit dibatasi', as
   assert.match(pr.data, /@page\{size:A4/);
   const auditDenied = await call('GET', '/reports/audit?format=json', 'mandor');
   assert.equal(auditDenied.status, 403);
-  const auditOk = await call('GET', '/reports/audit?format=json', 'auditor');
+  const auditOk = await call('GET', '/reports/audit?format=json', 'manager');
   assert.equal(auditOk.status, 200);
   assert.ok(auditOk.data.count > 0);
   const dash = await call('GET', `/dashboard?plan_id=${planId}`, 'manager');
@@ -321,7 +321,7 @@ test('Laporan: CSV kompatibel Excel (BOM), halaman print A4, audit dibatasi', as
 });
 
 test('Audit trail: aksi tercatat tanpa hard delete', async () => {
-  const a = await call('GET', '/audit?limit=500', 'auditor');
+  const a = await call('GET', '/audit?limit=500', 'admin');
   assert.equal(a.status, 200);
   assert.ok(a.data.items.some((x) => x.action === 'APPROVE' && x.entity === 'process_adjustments'));
   assert.ok(a.data.items.some((x) => x.action === 'VERIFY' && x.entity === 'batch_cutoffs'));

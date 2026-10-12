@@ -95,6 +95,7 @@
     { id: 'kpi', label: 'OEE & Konsumsi', ok: () => has('dashboard.view'), view: viewKpi },
     { id: 'rep', label: 'Laporan', ok: () => has('report.view'), view: viewReports },
     { id: 'corr', label: 'Koreksi', ok: () => has('dashboard.view'), view: viewCorr },
+    { id: 'riwayat', label: 'Riwayat', ok: () => has('deleted.view'), view: viewRiwayat },
     { id: 'admin', label: 'Admin', ok: () => hasAny(['user.manage', 'rbac.manage', 'master.write', 'audit.view']), view: viewAdmin },
   ];
 
@@ -172,6 +173,9 @@
     editPlan(el) { S.editPlanId = Number(el.dataset.id); render(); },
     editWo(el) { S.editWoId = Number(el.dataset.id); render(); },
     cancelEdit() { S.editPlanId = null; S.editWoId = null; render(); },
+    openHist(el) { S.histEntity = el.dataset.entity; S.histId = Number(el.dataset.id); S.histLabel = el.dataset.label || ''; S.histPage = 1; S.tab = 'riwayat'; render(); },
+    clearHist() { S.histEntity = null; S.histId = null; S.histLabel = ''; render(); },
+    histPage(el) { S.histPage = Math.max(1, Number(el.dataset.page) || 1); render(); },
     exportPeriod(el) {
       return ACT.run(el, async () => {
         const res = await fetch('/api/periods/current/export', { headers: { Authorization: 'Bearer ' + S.token, 'X-PMS-Token': S.token } });
@@ -305,6 +309,9 @@
       reloadPlans: true,
       submit: (b) => api('PATCH', `/plans/${S.editPlanId}`, buildPlanBody(b)).then((r) => ({ msg: `Nomor Produksi ${r.item.plan_no} diperbarui.` })),
       afterSubmit: () => { S.editPlanId = null; },
+    },
+    histSearch: {
+      submit: (b) => { S.histQ = String(b.q || '').trim(); S.histPage = 1; return { msg: 'Pencarian diperbarui.' }; },
     },
     woEdit: {
       submit: (b) => api('PATCH', `/work-orders/${S.editWoId}`, { buyer: b.buyer, target_ton: b.target_ton, notes: b.notes || null }).then((r) => ({ msg: `WO ${r.item.wo_no} diperbarui.` })),
@@ -445,6 +452,7 @@
     const rows = plans.map((p) => {
       const acts = [];
       if (has('data.edit') && p.status === 'DRAFT') acts.push(`<button class="btn sec" data-act="editPlan" data-id="${p.id}">Ubah</button>`);
+      if (has('deleted.view')) acts.push(`<button class="btn sec" data-act="openHist" data-entity="production_plans" data-id="${p.id}" data-label="${esc(p.plan_no)}">Riwayat</button>`);
       if (has('hard.delete') && p.status === 'DRAFT') acts.push(`<button class="btn bad" data-api="DELETE|/plans/:id" data-id="${p.id}" data-field="reason" data-prompt="Alasan hapus permanen (tercatat di riwayat):" data-confirm="Hapus permanen Nomor Produksi DRAFT ini?" data-ok="Nomor Produksi dihapus permanen (tersimpan di riwayat).">Hapus</button>`);
       if (canApprove && p.status === 'DRAFT') acts.push(`<button class="btn" data-api="POST|/plans/:id/approve" data-id="${p.id}" data-ok="Plan di-approve." >Approve</button>`);
       if (canApprove && p.status === 'APPROVED') acts.push(`<button class="btn" data-api="POST|/plans/:id/activate" data-id="${p.id}" data-ok="Plan diaktifkan. Versi induk di-SUPERSEDE.">Aktifkan</button>`);
@@ -489,6 +497,7 @@
       fmt(w.plans.length),
       `<span class="badge ${statusCls(w.status)}">${esc(w.status)}</span>`,
       canWrite ? `<button class="btn sec" data-act="editWo" data-id="${w.id}">Ubah</button> <button class="btn ${w.status === 'ACTIVE' ? 'warn' : ''}" data-api="POST|/work-orders/:id/toggle" data-id="${w.id}" data-ok="Status WO diubah.">${w.status === 'ACTIVE' ? 'Nonaktifkan' : 'Aktifkan'}</button>` : '',
+      has('deleted.view') ? `<button class="btn sec" data-act="openHist" data-entity="work_orders" data-id="${w.id}" data-label="${esc(w.wo_no)}">Riwayat</button>` : '',
       canDelete && !w.plans.length ? ` <button class="btn bad" data-api="DELETE|/work-orders/:id" data-id="${w.id}" data-field="reason" data-prompt="Alasan hapus permanen WO (tercatat di riwayat):" data-confirm="Hapus permanen WO ${esc(w.wo_no)}?" data-ok="WO dihapus permanen (tersimpan di riwayat).">Hapus</button>` : '',
     ]));
     const planRows = items.flatMap((w) => w.plans.map((p) => tr([esc(w.wo_no), esc(p.plan_no), esc(p.plan_date), esc(p.shift_code), `<span class="badge ${statusCls(p.status)}">${esc(p.status)}</span>`, fmt(p.bale), fmt(p.kg)])));
@@ -803,6 +812,40 @@
   }
 
   // ---------- VIEW: Admin ----------
+  const jsonCell = (txt) => {
+    if (!txt) return '';
+    let pretty = String(txt);
+    try { pretty = JSON.stringify(JSON.parse(txt), null, 2); } catch (e) { /* teks biasa */ }
+    return `<details><summary>lihat</summary><pre class="json">${esc(pretty)}</pre></details>`;
+  };
+
+  async function viewRiwayat() {
+    const page = S.histPage || 1;
+    const q = S.histQ || '';
+    const dr = await api('GET', `/deleted-records?page=${page}&limit=20&q=${encodeURIComponent(q)}`);
+    const parts = [`<h1>Riwayat</h1>`,
+      `<p class="muted" style="font-size:12px">Riwayat perubahan dan penghapusan permanen. Isi lengkapnya tetap tersimpan sampai reset/tutup buku tahunan.</p>`];
+
+    if (S.histEntity) {
+      const h = await api('GET', `/history?entity=${encodeURIComponent(S.histEntity)}&record_id=${S.histId}`);
+      const rowsA = h.audit.map((x) => tr([esc(x.ts), esc(x.username || ''), esc(x.action), jsonCell(x.old_value), jsonCell(x.new_value), esc(x.reason || '')]));
+      const rowsD = h.deleted.map((x) => tr([esc(x.deleted_at), esc(x.deleted_by || ''), '<b>HAPUS PERMANEN</b>', jsonCell(x.data), '', esc(x.reason || '')]));
+      parts.push(`<div class="card"><h2>Riwayat data: ${esc(S.histLabel || '')}</h2>
+        <button class="btn sec" data-act="clearHist" type="button">Tutup riwayat data</button>
+        ${table(['Waktu', 'User', 'Aksi', 'Sebelum', 'Sesudah', 'Alasan'], [...rowsD, ...rowsA])}</div>`);
+    }
+
+    parts.push(`<h2>Riwayat hapus permanen</h2>
+      <form class="inline" data-form="histSearch">${field('q', 'Cari (nomor, alasan, user, entitas)', { value: q })}<button class="btn sec" type="submit">Cari</button></form>`);
+    parts.push(table(['Waktu', 'Data', 'Entitas', 'Alasan', 'Oleh', 'Isi sebelum dihapus'],
+      dr.items.map((x) => tr([esc(x.deleted_at), esc(x.label || ''), esc(x.entity), esc(x.reason || ''), esc(x.deleted_by || ''), jsonCell(x.data)]))));
+    parts.push(`<div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+      <button class="btn sec" data-act="histPage" data-page="${dr.page - 1}" ${dr.page <= 1 ? 'disabled' : ''} type="button">‹ Sebelumnya</button>
+      <span class="muted">Halaman ${dr.page} dari ${dr.pages} · ${dr.total} data</span>
+      <button class="btn sec" data-act="histPage" data-page="${dr.page + 1}" ${dr.page >= dr.pages ? 'disabled' : ''} type="button">Berikutnya ›</button></div>`);
+    return parts.join('');
+  }
+
   async function viewAdmin() {
     const parts = [];
     if (has('user.manage')) {
@@ -841,10 +884,6 @@
           ${has('report.export') ? '<button class="btn sec" data-act="exportPeriod">Export periode berjalan (JSON)</button> ' : ''}
           ${has('period.close') && cur ? `<button class="btn bad" data-api="POST|/periods/close" data-field="confirm" data-prompt="Ketik TUTUP BUKU untuk konfirmasi:" data-confirm="Tutup buku ${esc(cur.name)}? Nomor akan mulai dari 001 pada periode baru." data-ok="Tutup buku berhasil. Periode baru dimulai.">Tutup buku</button>` : ''}
         </div>`);
-    }
-    if (has('audit.view')) {
-      const dr = (await api('GET', '/deleted-records')).items;
-      parts.push(`<h2>Riwayat hapus permanen</h2><p class="muted" style="font-size:12px">Data yang dihapus permanen dari tabel aktif. Isi lengkapnya tetap tersimpan di sini sampai reset/tutup buku tahunan.</p>${table(['Waktu', 'Data', 'Entitas', 'Alasan', 'Oleh', 'Isi sebelum dihapus'], dr.map((x) => tr([esc(x.deleted_at), esc(x.label || ''), esc(x.entity), esc(x.reason), esc(x.deleted_by || ''), `<details><summary>lihat</summary><pre class="json">${esc(JSON.stringify(JSON.parse(x.data), null, 2))}</pre></details>`])))}`);
     }
     if (has('audit.view')) {
       const a = (await api('GET', '/audit?limit=100')).items;

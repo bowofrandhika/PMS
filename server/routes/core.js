@@ -148,10 +148,37 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.json({ user: req.user, permissions: PERMISSIONS });
   });
 
-  // ---------- Riwayat hard delete ----------
-  r.get('/deleted-records', requireAuth, requirePerm('audit.view'), (req, res) => {
-    const items = db.prepare('SELECT id, entity, record_id, label, reason, deleted_by, deleted_at, data FROM deleted_records ORDER BY id DESC LIMIT 300').all();
-    res.json({ items });
+  // ---------- Riwayat hapus permanen & riwayat per data ----------
+  const listParams = (q) => {
+    const limit = Math.min(Math.max(Number(q.limit) || 20, 1), 100);
+    const page = Math.max(Number(q.page) || 1, 1);
+    return { limit, page, offset: (page - 1) * limit };
+  };
+  r.get('/deleted-records', requireAuth, requirePerm('deleted.view'), (req, res) => {
+    const { limit, page, offset } = listParams(req.query);
+    const where = [];
+    const vals = [];
+    if (req.query.entity) { where.push('entity = ?'); vals.push(String(req.query.entity)); }
+    const q = String(req.query.q || '').trim();
+    if (q) {
+      where.push('(label LIKE ? OR reason LIKE ? OR deleted_by LIKE ? OR entity LIKE ?)');
+      vals.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+    }
+    const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const total = db.prepare(`SELECT COUNT(*) AS n FROM deleted_records ${w}`).get(...vals).n;
+    const items = db.prepare(`SELECT id, entity, record_id, label, reason, deleted_by, deleted_at, data FROM deleted_records ${w} ORDER BY id DESC LIMIT ? OFFSET ?`)
+      .all(...vals, limit, offset);
+    res.json({ items, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) });
+  });
+
+  // Riwayat satu data: perubahan (audit) dan penghapusan permanen.
+  r.get('/history', requireAuth, requirePerm('deleted.view'), (req, res) => {
+    const entity = String(req.query.entity || '');
+    const recordId = String(req.query.record_id || '');
+    if (!entity || !recordId) throw badRequest('entity dan record_id wajib diisi');
+    const audit = db.prepare('SELECT ts, username, role, action, entity, record_id, old_value, new_value, reason FROM audit_logs WHERE entity = ? AND record_id = ? ORDER BY id DESC LIMIT 200').all(entity, recordId);
+    const deleted = db.prepare('SELECT id, entity, record_id, label, reason, deleted_by, deleted_at, data FROM deleted_records WHERE entity = ? AND record_id = ? ORDER BY id DESC').all(entity, recordId);
+    res.json({ audit, deleted });
   });
 
   // ---------- Master data ----------

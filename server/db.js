@@ -660,7 +660,7 @@ function seedUsers(db) {
     ['qc', 'QC Produksi', 'QC'],
     ['manager', 'Manager Produksi', 'MANAGER'],
     ['spv2', 'SPV Produksi Kering (Approver)', 'SPV'],
-    ['auditor', 'Auditor / Document Control', 'AUDITOR'],
+    ['direktur', 'Direktur', 'DIREKTUR'],
   ];
   const password = process.env.PMS_DEMO_PASSWORD || 'Password123!';
   const ins = db.prepare('INSERT INTO users (username, full_name, password_hash, created_at) VALUES (?, ?, ?, ?)');
@@ -669,6 +669,34 @@ function seedUsers(db) {
     const info = ins.run(username, fullName, hashPassword(password), nowIso());
     link.run(Number(info.lastInsertRowid), role);
   }
+}
+
+// Penyesuaian satu kali untuk database yang sudah berjalan:
+// - peran AUDITOR dihapus dari sistem (akun auditor dihapus, atau dinonaktifkan bila sudah punya jejak audit);
+// - hak melihat riwayat (deleted.view) diberikan ke SPV, Manager, Direktur, dan Admin;
+// - akun direktur disediakan.
+function reconcileRbacAndAccounts(db) {
+  const flag = 'migrasi_riwayat_v1';
+  if (db.prepare('SELECT 1 FROM settings WHERE key = ?').get(flag)) return;
+  const aud = db.prepare("SELECT id FROM users WHERE username = 'auditor'").get();
+  if (aud) {
+    db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(aud.id);
+    const used = db.prepare('SELECT COUNT(*) AS n FROM audit_logs WHERE user_id = ?').get(aud.id).n;
+    if (used === 0) db.prepare('DELETE FROM users WHERE id = ?').run(aud.id);
+    else db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(aud.id);
+  }
+  db.prepare("DELETE FROM user_roles WHERE role_code = 'AUDITOR'").run();
+  db.prepare("DELETE FROM role_permissions WHERE role_code = 'AUDITOR'").run();
+  db.prepare("DELETE FROM roles WHERE code = 'AUDITOR'").run();
+  const perm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_code, permission) VALUES (?, ?)');
+  for (const code of ['SPV', 'MANAGER', 'DIREKTUR', 'ADMIN']) perm.run(code, 'deleted.view');
+  if (!db.prepare("SELECT id FROM users WHERE username = 'direktur'").get()) {
+    const password = process.env.PMS_DEMO_PASSWORD || 'Password123!';
+    const info = db.prepare('INSERT INTO users (username, full_name, password_hash, created_at) VALUES (?, ?, ?, ?)')
+      .run('direktur', 'Direktur', hashPassword(password), nowIso());
+    db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_code) VALUES (?, ?)').run(Number(info.lastInsertRowid), 'DIREKTUR');
+  }
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(flag, 'done');
 }
 
 function seedSettings(db) {
@@ -715,6 +743,7 @@ function openDatabase(file) {
   seedSettings(db);
   seedMasterData(db);
   seedUsers(db);
+  reconcileRbacAndAccounts(db);
   return db;
 }
 
