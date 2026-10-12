@@ -40,6 +40,13 @@ before(async () => {
 
 after(() => { if (server) server.close(); if (db) db.close(); });
 
+test('auth: token diterima dari header X-PMS-Token bila Authorization disaring proxy', async () => {
+  const r = await fetch(`${base}/api/me`, { headers: { 'X-PMS-Token': tokens.spv } });
+  assert.equal(r.status, 200);
+  const bad = await fetch(`${base}/api/me`, { headers: { 'X-PMS-Token': 'palsu' } });
+  assert.equal(bad.status, 401);
+});
+
 test('login: username tidak peka huruf besar/kecil', async () => {
   const r = await call('POST', '/auth/login', null, { username: ' SPV ', password: PASSWORD });
   assert.equal(r.status, 200, JSON.stringify(r.data));

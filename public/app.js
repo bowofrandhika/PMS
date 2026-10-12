@@ -2,8 +2,14 @@
 (function () {
   'use strict';
 
+  // Penyimpanan token aman: browser dapat memblokir localStorage di dalam iframe/preview.
+  const store = {
+    get() { try { return window.localStorage.getItem('pms_token'); } catch (e) { return null; } },
+    set(v) { try { window.localStorage.setItem('pms_token', v); } catch (e) { /* abaikan */ } },
+    del() { try { window.localStorage.removeItem('pms_token'); } catch (e) { /* abaikan */ } },
+  };
   const S = {
-    token: localStorage.getItem('pms_token') || null,
+    token: store.get() || null,
     me: null,
     tab: 'dash',
     planId: null,
@@ -28,7 +34,7 @@
 
   async function api(method, url, body) {
     const headers = {};
-    if (S.token) headers.Authorization = 'Bearer ' + S.token;
+    if (S.token) { headers.Authorization = 'Bearer ' + S.token; headers['X-PMS-Token'] = S.token; }
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     const res = await fetch('/api' + url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
     const ct = res.headers.get('content-type') || '';
@@ -36,9 +42,10 @@
     if (res.status === 401 && S.token && !url.startsWith('/auth/login')) {
       // Token tidak valid (sesi berakhir/diganti). Kembali ke login; pesan hanya jika sebelumnya sudah login.
       const wasLoggedIn = !!S.me;
-      S.token = null; S.me = null; S.plans = []; localStorage.removeItem('pms_token');
-      if (wasLoggedIn) S.flash = { kind: 'err', text: 'Sesi berakhir. Silakan login ulang.' };
-      const e = new Error('Sesi tidak valid');
+      S.token = null; S.me = null; S.plans = []; store.del();
+      const reason = data && data.error ? ` (${data.error})` : '';
+      if (wasLoggedIn) S.flash = { kind: 'err', text: 'Sesi berakhir. Silakan login ulang.' + reason };
+      const e = new Error('Sesi tidak valid' + reason);
       e.status = 401;
       throw e;
     }
@@ -125,7 +132,7 @@
     try {
       if (!S.token) { app.innerHTML = loginView(); return; }
       if (!S.me) {
-        try { S.me = (await api('GET', '/me')).user; } catch (e) { S.token = null; localStorage.removeItem('pms_token'); app.innerHTML = loginView(); return; }
+        try { S.me = (await api('GET', '/me')).user; } catch (e) { S.token = null; store.del(); app.innerHTML = loginView(); return; }
       }
       if (!S.me) { app.innerHTML = loginView(); return; }
       try { S.plans = (await api('GET', '/plans')).items; } catch (e) { S.plans = []; }
@@ -150,7 +157,7 @@
   const ACT = {
     async logout() {
       try { await api('POST', '/auth/logout'); } catch (e) { /* abaikan */ }
-      S.token = null; S.me = null; S.plans = []; localStorage.removeItem('pms_token'); render();
+      S.token = null; S.me = null; S.plans = []; store.del(); render();
     },
     tab(el) { S.tab = el.dataset.id; render(); },
     setPlan(el) { S.planId = el.value ? Number(el.value) : null; S.runId = null; S.shiftId = null; S.palletId = null; render(); },
@@ -213,7 +220,7 @@
       if (name === 'login') {
         S.flash = null;
         const res = await api('POST', '/auth/login', body);
-        S.token = res.token; localStorage.setItem('pms_token', res.token);
+        S.token = res.token; store.set(res.token);
         S.me = null; S.plans = []; S.planId = null;
         flash('ok', 'Login berhasil.');
         return render();
@@ -623,7 +630,7 @@
   }
 
   async function rawFetch(url) {
-    const res = await fetch('/api' + url, { headers: { Authorization: 'Bearer ' + S.token } });
+    const res = await fetch('/api' + url, { headers: { Authorization: 'Bearer ' + S.token, 'X-PMS-Token': S.token } });
     if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || 'Gagal'); }
     return res;
   }

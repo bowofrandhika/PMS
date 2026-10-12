@@ -44,7 +44,9 @@ function createAuth(db) {
   // Middleware: memastikan token valid, tidak timeout, dan memuat konteks user.
   function requireAuth(req, res, next) {
     const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    // Token diterima dari Authorization: Bearer, atau header kustom X-PMS-Token (tahan terhadap proxy yang menyaring Authorization).
+    let token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token && req.headers['x-pms-token']) token = String(req.headers['x-pms-token']).trim();
     if (!token) return next(new HttpError(401, 'Silakan login terlebih dahulu'));
     const session = db.prepare('SELECT token, user_id, last_seen FROM sessions WHERE token = ?').get(token);
     if (!session) return next(new HttpError(401, 'Sesi tidak valid, silakan login ulang'));
