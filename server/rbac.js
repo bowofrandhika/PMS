@@ -44,17 +44,18 @@ const PERMISSIONS = {
   'user.manage': 'Mengelola user',
   'rbac.manage': 'Mengelola role dan hak akses',
   'wo.write': 'Mengelola Work Order (WO): tambah, ubah, nonaktifkan',
+  'hard.delete': 'Hapus permanen data (diarsipkan ke riwayat penghapusan)',
 };
 
 const ROLES = {
-  SPV: { name: 'SPV Produksi', perms: ['dashboard.view', 'plan.view', 'plan.write', 'wo.write', 'plan.approve', 'dryer.view', 'dryer.stop', 'adjustment.request', 'adjustment.approve', 'exception.approve', 'cutoff.approve', 'correction.request', 'correction.approve', 'report.view', 'report.export'] },
+  SPV: { name: 'SPV Produksi', perms: ['dashboard.view', 'plan.view', 'plan.write', 'wo.write', 'hard.delete', 'plan.approve', 'dryer.view', 'dryer.stop', 'adjustment.request', 'adjustment.approve', 'exception.approve', 'cutoff.approve', 'correction.request', 'correction.approve', 'report.view', 'report.export'] },
   MANDOR: { name: 'Mandor', perms: ['dashboard.view', 'plan.view', 'dryer.view', 'shift.write', 'trolley.write', 'cake.write', 'movement.write', 'downtime.write', 'downtime.verify', 'handover.write', 'cutoff.verify', 'consumable.write', 'correction.request', 'report.view'] },
   OP_DRYER: { name: 'Operator Dryer', perms: ['plan.view', 'dryer.view', 'dryer.write', 'dryer.stop', 'sampling.write', 'adjustment.request', 'adjustment.execute'] },
   OP_MD: { name: 'Operator Metal Detector', perms: ['plan.view', 'md.challenge', 'md.run', 'bale.write', 'exception.write', 'pallet.write', 'cutoff.request', 'consumable.write', 'correction.request'] },
   QC: { name: 'QC', perms: ['dashboard.view', 'plan.view', 'quality.release', 'report.view', 'report.export'] },
   MANAGER: { name: 'Manager', perms: ['dashboard.view', 'plan.view', 'wo.write', 'consumable.price', 'report.view', 'report.export', 'audit.view'] },
   DIREKTUR: { name: 'Direktur', perms: ['dashboard.view', 'plan.view', 'wo.write', 'report.view', 'report.export', 'audit.view'] },
-  ADMIN: { name: 'Admin Sistem', perms: ['master.write', 'wo.write', 'user.manage', 'rbac.manage', 'audit.view', 'plan.view', 'dashboard.view'] },
+  ADMIN: { name: 'Admin Sistem', perms: ['master.write', 'wo.write', 'hard.delete', 'user.manage', 'rbac.manage', 'audit.view', 'plan.view', 'dashboard.view'] },
   AUDITOR: { name: 'Document Control / Auditor', perms: ['dashboard.view', 'plan.view', 'report.view', 'report.export', 'audit.view'] },
 };
 

@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const { nowIso, hashPassword, verifyPassword } = require('../db');
 const { PERMISSIONS } = require('../rbac');
+const { hardDelete } = require('../archive');
 const {
   HttpError, badRequest, notFound, conflict, audit, setting, settingNumber,
   requireString, requireNumber, requireEnum, loadUserContext, optionalTime, sessionCookie, SESSION_COOKIE,
@@ -138,6 +139,12 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.json({ user: req.user, permissions: PERMISSIONS });
   });
 
+  // ---------- Riwayat hard delete ----------
+  r.get('/deleted-records', requireAuth, requirePerm('audit.view'), (req, res) => {
+    const items = db.prepare('SELECT id, entity, record_id, label, reason, deleted_by, deleted_at, data FROM deleted_records ORDER BY id DESC LIMIT 300').all();
+    res.json({ items });
+  });
+
   // ---------- Master data ----------
   for (const [slug, def] of Object.entries(MASTER)) {
     r.get(`/master/${slug}`, requireAuth, (req, res) => {
@@ -153,6 +160,12 @@ function buildRouter(db, { requireAuth, requirePerm }) {
       const created = db.prepare(`SELECT * FROM ${def.table} WHERE id = ?`).get(Number(info.lastInsertRowid));
       audit(db, req.user, { action: 'CREATE', entity: def.table, recordId: created.id, newValue: created });
       res.status(201).json({ item: created });
+    });
+
+    r.delete(`/master/${slug}/:id`, requireAuth, requirePerm('hard.delete'), (req, res) => {
+      const reason = requireString(req.body || {}, 'reason', { max: 300 });
+      hardDelete(db, req.user, { entity: def.table, table: def.table, id: Number(req.params.id), label: `${slug} #${req.params.id}`, reason });
+      res.json({ ok: true, note: 'Data dihapus permanen; isi lengkapnya tersimpan di riwayat penghapusan.' });
     });
 
     r.patch(`/master/${slug}/:id`, requireAuth, requirePerm('master.write'), (req, res) => {

@@ -146,6 +146,19 @@ CREATE TABLE IF NOT EXISTS consumable_prices (
   created_at TEXT NOT NULL
 );
 
+-- ===== Riwayat hard delete (arsip; tidak pernah dihapus) =====
+CREATE TABLE IF NOT EXISTS deleted_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  record_id INTEGER NOT NULL,
+  label TEXT,
+  data TEXT NOT NULL,        -- isi lengkap baris sebelum dihapus (JSON)
+  reason TEXT NOT NULL,
+  deleted_by TEXT,
+  deleted_at TEXT NOT NULL
+);
+
 -- ===== Work Order (WO) per buyer =====
 CREATE TABLE IF NOT EXISTS work_orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

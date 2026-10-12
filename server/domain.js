@@ -31,17 +31,18 @@ const GRADES = ['SIR20', 'SIR10'];        // grade produk kering
 const BATCH_CODES = ['B-0001', 'B-0002', 'B-0003'];
 const WO_STATUS = ['ACTIVE', 'NONAKTIF'];
 
-// Nomor Produksi (DryProduction): DP-DDMMYY-NNN, NNN = nomor urut per tanggal produksi.
-function productionNo(db, planDate) {
+// Nomor Produksi (DryProduction): DP{shift}-DDMMYY-NNN, contoh DP1-121026-001.
+// NNN = nomor urut per tanggal produksi, lanjutan tanpa memandang shift (sore/shift 2 melanjutkan nomor sebelumnya).
+function productionNo(db, planDate, shift) {
   const [y, m, d] = String(planDate).split('-');
-  const prefix = `DP-${d}${m}${y.slice(2)}-`;
-  const rows = db.prepare('SELECT DISTINCT plan_no FROM production_plans WHERE plan_no LIKE ?').all(`${prefix}%`);
+  const dd = `${d}${m}${y.slice(2)}`;
+  const rows = db.prepare('SELECT DISTINCT plan_no FROM production_plans WHERE plan_no LIKE ?').all(`DP%-${dd}-%`);
   let max = 0;
   for (const r of rows) {
-    const n = Number(r.plan_no.slice(prefix.length));
-    if (Number.isInteger(n) && n > max) max = n;
+    const hit = /^DP[0-9]?-(\d{6})-(\d{3})$/.exec(r.plan_no);
+    if (hit && hit[1] === dd && Number(hit[2]) > max) max = Number(hit[2]);
   }
-  return `${prefix}${String(max + 1).padStart(3, '0')}`;
+  return `DP${shift}-${dd}-${String(max + 1).padStart(3, '0')}`;
 }
 
 const DRYER_COMPARTMENTS = 23;
@@ -194,7 +195,10 @@ function normalizePlanInput(db, b, { HttpError, badRequest }) {
     out.batch_sequence = b.batch_sequence.map((item, idx) => {
       if (!item || typeof item !== 'object') throw badRequest('Setiap item batch_sequence harus berupa objek');
       const code = String(item.batch_code || '').trim();
-      if (!BATCH_CODES.includes(code)) throw badRequest(`batch_code harus salah satu dari: ${BATCH_CODES.join(', ')}`);
+      if (!/^B-\d{4}$/.test(code)) throw badRequest(`batch_code ${code || '(kosong)'} harus berformat B-NNNN, contoh B-0023`);
+      // Kode batch yang belum ada di master dibuat otomatis (B-0023 dst.).
+      db.prepare("INSERT OR IGNORE INTO batches (code, product, grade, status, effective_date) VALUES (?, ?, ?, 'ACTIVE', ?)")
+        .run(code, b.product || null, b.product || null, new Date().toISOString().slice(0, 10));
       if (seen.has(code)) throw badRequest(`batch_code ${code} duplikat dalam urutan batch`);
       seen.add(code);
       if (!db.prepare('SELECT id FROM batches WHERE code = ?').get(code)) throw badRequest(`Batch tidak ditemukan: ${code}`);

@@ -263,11 +263,11 @@
       reloadPlans: true,
       submit: (b) => {
         const body = { ...b };
-        const seq = [1, 2, 3].map((i) => body[`batch_seq_${i}`]).filter(Boolean);
-        if (new Set(seq).size !== seq.length) throw new Error('Urutan batch tidak boleh duplikat.');
-        body.batch_sequence = seq.map((code, i) => ({ batch_code: code, seq: i + 1 }));
+        const codes = String(body.batch_codes || '').split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
+        if (new Set(codes).size !== codes.length) throw new Error('Kode batch tidak boleh duplikat.');
+        body.batch_sequence = codes.map((code, i) => ({ batch_code: code, seq: i + 1 }));
         body.sampling_rules = buildSampling(body);
-        for (const k of Object.keys(body)) if (/^batch_seq_|^sr_/.test(k)) delete body[k];
+        for (const k of Object.keys(body)) if (/^batch_codes$|^sr_/.test(k)) delete body[k];
         // 1 Bale = 35 kg. Pakai nilai yang diisi duluan (kolom lainnya sudah terkunci otomatis).
         if (body.target_bale !== undefined && body.target_bale !== '') {
           body.target_bale = Math.round(Number(body.target_bale));
@@ -280,6 +280,9 @@
         }
         return api('POST', '/plans', body).then((r) => ({ msg: `Nomor Produksi ${r.item.plan_no} dibuat (DRAFT).` }));
       },
+    },
+    masterDelete: {
+      submit: (b, form) => api('DELETE', `/master/${form.dataset.slug}/${b.id}`, { reason: b.reason }).then(() => ({ msg: 'Data master dihapus permanen (tercatat di riwayat).' })),
     },
     woCreate: {
       submit: (b) => api('POST', '/work-orders', b).then((r) => ({ msg: `WO ${r.item.wo_no} disimpan.` })),
@@ -374,6 +377,7 @@
     const canApprove = has('plan.approve');
     const rows = plans.map((p) => {
       const acts = [];
+      if (has('hard.delete') && p.status === 'DRAFT') acts.push(`<button class="btn bad" data-api="DELETE|/plans/:id" data-id="${p.id}" data-field="reason" data-prompt="Alasan hapus permanen (tercatat di riwayat):" data-confirm="Hapus permanen Nomor Produksi DRAFT ini?" data-ok="Nomor Produksi dihapus permanen (tersimpan di riwayat).">Hapus</button>`);
       if (canApprove && p.status === 'DRAFT') acts.push(`<button class="btn" data-api="POST|/plans/:id/approve" data-id="${p.id}" data-ok="Plan di-approve." >Approve</button>`);
       if (canApprove && p.status === 'APPROVED') acts.push(`<button class="btn" data-api="POST|/plans/:id/activate" data-id="${p.id}" data-ok="Plan diaktifkan. Versi induk di-SUPERSEDE.">Aktifkan</button>`);
       if (canWrite && p.status === 'ACTIVE') acts.push(`<button class="btn sec" data-api="POST|/plans/:id/revise" data-id="${p.id}" data-prompt="Alasan revisi (JSON: {&quot;reason&quot;:&quot;...&quot;, ...perubahan}):" data-default='{"reason":""}' data-ok="Revisi dibuat sebagai versi baru (DRAFT).">Revisi</button>`);
@@ -383,14 +387,15 @@
     let equip = '';
     if (S.planId) {
       const es = await api('GET', `/equipment/status?plan_id=${S.planId}`);
-      equip = table(['Equipment', 'Nama', 'Tipe', 'Status'], es.items.map((x) => tr([esc(x.code), esc(x.name), esc(x.type), `<span class="badge ${statusCls(x.status || '')}">${esc(x.status || 'PLANNED')}</span>`])));
+      const relevant = es.items.filter((x) => ['DRYER', 'PRESS', 'PRESS_CHAMBER'].includes(x.type));
+      equip = `<p class="muted" style="font-size:12px">Isi: kondisi Dryer, Press, dan chamber Press yang dipilih di Nomor Produksi ini. Dihitung otomatis dari pilihan Dryer/Press di plan, status run Dryer, dan downtime yang masih terbuka. Hanya dibaca.</p>
+        <p class="muted" style="font-size:12px"><b>NOT PLANNED</b> = tidak dipilih di plan · <b>PLANNED ACTIVE</b> = dipilih, belum berjalan · <b>RUNNING / STOPPED</b> = status run Dryer · <b>DOWNTIME</b> = downtime masih terbuka · <b>REDUCED CAPACITY</b> = sebagian chamber Press bermasalah.</p>` + table(['Kode', 'Nama', 'Tipe', 'Status'], relevant.map((x) => tr([esc(x.code), esc(x.name), esc(x.type), `<span class="badge ${statusCls(x.status || '')}">${esc(x.status || 'PLANNED')}</span>`])));
     }
     return `
       <h1>Nomor Produksi</h1>
       ${table(['ID', 'Nomor Produksi', 'Versi', 'Status', 'Tanggal', 'Shift', 'Work Order', 'Grade', 'Target Bale', 'Dryer', 'Press', 'Aksi'], rows)}
       <p class="muted" style="font-size:12px">Nomor Produksi (DRAFT) → APPROVED → ACTIVE → CLOSED. Versi lama menjadi SUPERSEDED dan tidak ditimpa. Approver tidak boleh sama dengan pembuat (maker-checker).</p>
       ${canWrite ? `<h2>Buat Nomor Produksi baru (DRAFT)</h2>
-      <p class="muted" style="font-size:12px">Nomor dibuat otomatis: <b>DP-DDMMYY-NNN</b> (tanggal produksi + nomor urut hari itu).</p>
       ${wos.length ? '' : '<div class="msg info">Belum ada Work Order aktif. Tambahkan di menu Work Order.</div>'}
       <form class="inline" data-form="planCreate">
         ${field('plan_date', 'Tanggal produksi', { required: true, type: 'date', value: new Date().toISOString().slice(0, 10) })}
@@ -403,8 +408,7 @@
         ${field('cake_interval_min', 'Interval berat Cake (menit)', { select: [30, 60], value: 60, type: 'num' })}
         <div><div class="muted" style="font-size:12px">Dryer aktif</div>${checks('dryers', ['DRY-A', 'DRY-B'], ['DRY-A'])}</div>
         <div><div class="muted" style="font-size:12px">Press aktif</div>${checks('presses', ['PRS-A', 'PRS-B', 'PRS-C'], ['PRS-A'])}</div>
-        <div style="flex-basis:100%"><div class="muted" style="font-size:12px">Urutan batch</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">${[1, 2, 3].map((i) => field(`batch_seq_${i}`, `Urutan ${i}`, { select: [{ value: '', label: '—' }, ...BATCH_CODES.map((c) => ({ value: c, label: c }))] })).join('')}</div></div>
+        ${field('batch_codes', 'Kode batch produksi (pisahkan koma)', { required: true, placeholder: 'B-0023, B-0024' })}
         <div style="flex-basis:100%"><div class="muted" style="font-size:12px">Sampling (kosongkan yang tidak dipakai)</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             ${field('sr_time', 'Interval waktu (menit)', { type: 'num', value: 30 })}
@@ -423,15 +427,24 @@
   async function viewWO() {
     const items = (await api('GET', '/work-orders')).items;
     const canWrite = has('wo.write');
+    const canDelete = has('hard.delete');
+    const ton = (kg) => (Math.round((kg / 1000) * 1000) / 1000).toLocaleString('id-ID');
     const rows = items.map((w) => tr([
-      esc(w.wo_no), esc(w.buyer), fmt(w.target_ton), fmt(w.target_kg),
-      `<span class="badge ${statusCls(w.status)}">${esc(w.status)}</span>`, esc(w.created_by || '—'),
+      esc(w.wo_no), esc(w.buyer), fmt(w.target_ton), `${ton(w.produced_kg)}`,
+      w.progress_pct === null ? '—' : `<b>${fmt(w.progress_pct)}%</b>`,
+      `${ton(Math.max(0, w.target_kg - w.produced_kg))}`,
+      fmt(w.plans.length),
+      `<span class="badge ${statusCls(w.status)}">${esc(w.status)}</span>`,
       canWrite ? `<button class="btn sec" data-api="PATCH|/work-orders/:id" data-id="${w.id}" data-prompt="Ubah WO (JSON: buyer, target_ton, notes):" data-default="${esc(JSON.stringify({ buyer: w.buyer, target_ton: w.target_ton, notes: w.notes || '' }))}" data-ok="WO diperbarui.">Ubah</button> <button class="btn ${w.status === 'ACTIVE' ? 'warn' : ''}" data-api="POST|/work-orders/:id/toggle" data-id="${w.id}" data-ok="Status WO diubah.">${w.status === 'ACTIVE' ? 'Nonaktifkan' : 'Aktifkan'}</button>` : '',
+      canDelete && !w.plans.length ? ` <button class="btn bad" data-api="DELETE|/work-orders/:id" data-id="${w.id}" data-field="reason" data-prompt="Alasan hapus permanen WO (tercatat di riwayat):" data-confirm="Hapus permanen WO ${esc(w.wo_no)}?" data-ok="WO dihapus permanen (tersimpan di riwayat).">Hapus</button>` : '',
     ]));
+    const planRows = items.flatMap((w) => w.plans.map((p) => tr([esc(w.wo_no), esc(p.plan_no), esc(p.plan_date), esc(p.shift_code), `<span class="badge ${statusCls(p.status)}">${esc(p.status)}</span>`, fmt(p.bale), fmt(p.kg)])));
     return `
       <h1>Work Order (WO)</h1>
-      ${table(['Nomor WO', 'Buyer', 'Target (ton)', 'Target (kg)', 'Status', 'Dibuat oleh', 'Aksi'], rows)}
-      <p class="muted" style="font-size:12px">WO = pesanan buyer dengan target tonase. Nomor Produksi harian memilih satu WO. Tidak ada hapus permanen; WO yang tidak dipakai dinonaktifkan.</p>
+      <p class="muted" style="font-size:12px">Produksi WO dihitung otomatis dari semua Bale output (OK + Hold + Reject) pada Nomor Produksi yang memakai WO tersebut. 1 Bale = 35 kg. Satu WO bisa terdiri dari beberapa hari produksi.</p>
+      ${table(['Nomor WO', 'Buyer', 'Target (ton)', 'Terproduksi (ton)', 'Progres', 'Sisa (ton)', 'Jml Nomor Produksi', 'Status', 'Aksi'], rows)}
+      <h2>Rincian Nomor Produksi per WO</h2>
+      ${table(['WO', 'Nomor Produksi', 'Tanggal', 'Shift', 'Status', 'Bale', 'kg'], planRows)}
       ${canWrite ? `<h2>Tambah WO</h2>
       <form class="inline" data-form="woCreate">
         ${field('wo_no', 'Nomor WO', { required: true, placeholder: 'WO-BELL-002' })}
@@ -749,11 +762,16 @@
       const m = await api('GET', `/master/${sel}`);
       parts.push(`<h2>Master data</h2><label>Tabel <select id="mSlug" data-act="masterSlug">${slugs.map((s) => `<option ${s === sel ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
         ${json(m.items.slice(0, 60))}
-        ${has('master.write') ? `<form class="inline card" data-form="masterNew" data-slug="${sel}"><label>Data baru (JSON)<textarea name="body" data-type="json" required>{}</textarea></label><button class="btn" type="submit">Tambah</button></form>` : ''}`);
+        ${has('master.write') ? `<form class="inline card" data-form="masterNew" data-slug="${sel}"><label>Data baru (JSON)<textarea name="body" data-type="json" required>{}</textarea></label><button class="btn" type="submit">Tambah</button></form>` : ''}
+        ${has('hard.delete') ? `<form class="inline card" data-form="masterDelete" data-slug="${sel}"><b>Hapus permanen</b> <span class="muted">(isi tersimpan di riwayat penghapusan)</span>${field('id', 'ID', { required: true, type: 'num' })}${field('reason', 'Alasan', { required: true })}<button class="btn bad" type="submit">Hapus permanen</button></form>` : ''}`);
     }
     if (has('rbac.manage')) {
       const st = (await api('GET', '/settings')).items;
       parts.push(`<h2>Setting sistem</h2>${table(['Kunci', 'Nilai', 'Ubah'], st.map((s) => tr([esc(s.key), esc(s.value), `<form class="inline" data-form="settingSet" data-key="${esc(s.key)}"><input name="value" value="${esc(s.value)}" data-type="str" style="min-width:90px"><button class="btn sec" type="submit">Simpan</button></form>`])))}`);
+    }
+    if (has('audit.view')) {
+      const dr = (await api('GET', '/deleted-records')).items;
+      parts.push(`<h2>Riwayat hapus permanen</h2><p class="muted" style="font-size:12px">Data yang dihapus permanen dari tabel aktif. Isi lengkapnya tetap tersimpan di sini sampai reset/tutup buku tahunan.</p>${table(['Waktu', 'Data', 'Entitas', 'Alasan', 'Oleh', 'Isi sebelum dihapus'], dr.map((x) => tr([esc(x.deleted_at), esc(x.label || ''), esc(x.entity), esc(x.reason), esc(x.deleted_by || ''), `<details><summary>lihat</summary><pre class="json">${esc(JSON.stringify(JSON.parse(x.data), null, 2))}</pre></details>`])))}`);
     }
     if (has('audit.view')) {
       const a = (await api('GET', '/audit?limit=100')).items;

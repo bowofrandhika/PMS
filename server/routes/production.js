@@ -7,6 +7,7 @@ const {
   optionalTime,
 } = require('../http');
 const D = require('../domain');
+const { hardDelete } = require('../archive');
 
 function buildRouter(db, { requireAuth, requirePerm }) {
   const r = express.Router();
@@ -43,7 +44,7 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     if (!norm.plan_date) throw badRequest('plan_date wajib diisi');
     if (!norm.shift_code) throw badRequest('shift_code wajib diisi');
     // Nomor Produksi dibuat otomatis: DP-DDMMYY-NNN (input dari user diabaikan).
-    const planNo = D.productionNo(db, norm.plan_date);
+    const planNo = D.productionNo(db, norm.plan_date, norm.shift_code);
     const info = db.prepare(`INSERT INTO production_plans
       (plan_no, version, status, plan_date, shift_code, work_order, product, target_bale, target_kg, target_trolley,
        dryers, presses, sampling_rules, cake_interval_min, batch_sequence, notes, created_by, created_at)
@@ -75,6 +76,15 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.json({ item: after });
   });
 
+  // ---------- Hard delete Nomor Produksi (hanya DRAFT; yang sudah disetujui harus direvisi/ditutup) ----------
+  r.delete('/plans/:id', requireAuth, requirePerm('hard.delete'), (req, res) => {
+    const plan = loadPlan(Number(req.params.id));
+    if (plan.status !== 'DRAFT') throw conflict(`Nomor Produksi berstatus ${plan.status}; hanya DRAFT yang dapat dihapus permanen`);
+    const reason = requireString(req.body || {}, 'reason', { max: 300 });
+    hardDelete(db, req.user, { entity: 'production_plans', table: 'production_plans', id: plan.id, label: `${plan.plan_no} v${plan.version}`, reason });
+    res.json({ ok: true, note: 'Nomor Produksi DRAFT dihapus permanen (tercatat di riwayat).' });
+  });
+
   // ---------- Work Order (WO) ----------
   // WO per buyer (contoh WO-BELL-001 Bellshina 500 ton). Dikelola SPV, Manager, Direktur, Admin web.
   // Tidak ada hard delete: WO dinonaktifkan (status NONAKTIF).
@@ -94,9 +104,36 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     return out;
   }
 
+  // Progres WO: produksi = jumlah Bale output (OK + Hold + Reject) x 35 kg, dari semua versi Nomor Produksi
+  // yang memakai WO tersebut. Dihitung dari transaksi Bale, bukan input manual.
   r.get('/work-orders', requireAuth, requirePerm('plan.view'), (req, res) => {
-    const items = db.prepare('SELECT * FROM work_orders ORDER BY status, wo_no').all();
+    const wos = db.prepare('SELECT * FROM work_orders ORDER BY status, wo_no').all();
+    const plans = db.prepare(`SELECT p.id, p.plan_no, p.version, p.plan_date, p.shift_code, p.status, p.work_order, p.product,
+        (SELECT COALESCE(SUM(b.gross_qty), 0) FROM bale_events b WHERE b.plan_id = p.id) AS bale
+      FROM production_plans p WHERE p.work_order IS NOT NULL ORDER BY p.plan_date, p.id`).all();
+    const items = wos.map((w) => {
+      const byNo = new Map();
+      for (const p of plans.filter((x) => x.work_order === w.wo_no)) {
+        const cur = byNo.get(p.plan_no);
+        if (!cur) byNo.set(p.plan_no, { ...p });
+        else { cur.bale += p.bale; if (p.version > cur.version) Object.assign(cur, { ...p, bale: cur.bale }); }
+      }
+      const list = [...byNo.values()].map((p) => ({ ...p, kg: p.bale * D.BALE_KG }));
+      const bale = list.reduce((s, p) => s + p.bale, 0);
+      const kg = bale * D.BALE_KG;
+      return { ...w, plans: list, produced_bale: bale, produced_kg: kg, progress_pct: w.target_kg ? Math.round((kg / w.target_kg) * 1000) / 10 : null };
+    });
     res.json({ items });
+  });
+
+  // Hard delete WO: hanya jika belum dipakai Nomor Produksi.
+  r.delete('/work-orders/:id', requireAuth, requirePerm('hard.delete'), (req, res) => {
+    const wo = loadWo(Number(req.params.id));
+    const used = db.prepare('SELECT COUNT(*) AS n FROM production_plans WHERE work_order = ?').get(wo.wo_no).n;
+    if (used) throw conflict(`WO ${wo.wo_no} sudah dipakai ${used} Nomor Produksi; nonaktifkan saja`);
+    const reason = requireString(req.body || {}, 'reason', { max: 300 });
+    hardDelete(db, req.user, { entity: 'work_orders', table: 'work_orders', id: wo.id, label: wo.wo_no, reason });
+    res.json({ ok: true, note: 'WO dihapus permanen (tercatat di riwayat).' });
   });
 
   r.post('/work-orders', requireAuth, requirePerm('wo.write'), (req, res) => {

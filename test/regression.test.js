@@ -55,7 +55,7 @@ before(async () => {
   server = app.listen(0, '127.0.0.1');
   await new Promise((r) => server.once('listening', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  for (const u of ['spv', 'spv2', 'opmd', 'opdryer', 'mandor']) {
+  for (const u of ['spv', 'spv2', 'opmd', 'opdryer', 'mandor', 'admin']) {
     const r = await login(u);
     tokens[u] = r.data.token;
   }
@@ -249,14 +249,14 @@ test('B-09 migrasi: database lama (kolom ok_count) dibuka dan kolom diganti slot
 test('Nomor Produksi: format DP-DDMMYY-NNN, nomor urut per tanggal, input plan_no diabaikan', async () => {
   const a = await call('POST', '/plans', 'spv', planBody('IGNORED-1', { plan_date: '2026-10-12', target_bale: 10 }));
   assert.equal(a.status, 201, JSON.stringify(a.data));
-  assert.match(a.data.item.plan_no, /^DP-121026-\d{3}$/);
+  assert.match(a.data.item.plan_no, /^DP1-121026-\d{3}$/);
   const b = await call('POST', '/plans', 'spv', planBody('IGNORED-2', { plan_date: '2026-10-12', target_bale: 10 }));
   assert.equal(b.status, 201);
   const na = Number(a.data.item.plan_no.slice(-3));
   assert.equal(Number(b.data.item.plan_no.slice(-3)), na + 1);
-  assert.equal(b.data.item.plan_no.slice(0, 10), 'DP-121026-');
+  assert.ok(b.data.item.plan_no.startsWith('DP1-121026-'));
   const c = await call('POST', '/plans', 'spv', planBody('IGNORED-3', { plan_date: '2026-10-13', target_bale: 10 }));
-  assert.equal(c.data.item.plan_no.slice(0, 10), 'DP-131026-');
+  assert.ok(c.data.item.plan_no.startsWith('DP1-131026-'));
   assert.equal(c.data.item.plan_no.slice(-3), '001');
 });
 
@@ -304,4 +304,57 @@ test('Work Order: dibuat oleh SPV, nomor unik, WO nonaktif tidak bisa dipakai pl
   assert.equal(on.data.item.status, 'ACTIVE');
   const upd = await call('PATCH', `/work-orders/${id}`, 'spv', { target_ton: 20 });
   assert.equal(upd.data.item.target_kg, 20000);
+});
+
+test('Nomor Produksi: shift 2 melanjutkan nomor urut tanggal yang sama (tidak per shift)', async () => {
+  const a = await call('POST', '/plans', 'spv', planBody('S-1', { plan_date: '2026-10-20', shift_code: '1', target_bale: 10 }));
+  const b = await call('POST', '/plans', 'spv', planBody('S-2', { plan_date: '2026-10-20', shift_code: '2', target_bale: 10 }));
+  assert.equal(a.data.item.plan_no, 'DP1-201026-001');
+  assert.equal(b.data.item.plan_no, 'DP2-201026-002');
+});
+
+test('Hard delete: DRAFT dihapus permanen, isi tersimpan di riwayat; plan non-DRAFT ditolak', async () => {
+  const d = await call('POST', '/plans', 'spv', planBody('HD-1', { target_bale: 10 }));
+  const id = d.data.item.id;
+  const noReason = await call('DELETE', `/plans/${id}`, 'spv', {});
+  assert.equal(noReason.status, 400);
+  const del = await call('DELETE', `/plans/${id}`, 'spv', { reason: 'salah input uji' });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+  assert.equal(db.prepare('SELECT id FROM production_plans WHERE id = ?').get(id), undefined);
+  const hist = db.prepare("SELECT * FROM deleted_records WHERE entity = 'production_plans' AND record_id = ?").get(id);
+  assert.ok(hist, 'riwayat harus ada');
+  assert.equal(hist.reason, 'salah input uji');
+  assert.equal(JSON.parse(hist.data).plan_no, d.data.item.plan_no);
+  const list = await call('GET', '/deleted-records', 'admin');
+  assert.equal(list.status, 200);
+  assert.ok(list.data.items.some((x) => x.record_id === id));
+  // plan yang sudah ACTIVE tidak boleh dihapus permanen
+  const activeId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE' LIMIT 1").get().id;
+  const blocked = await call('DELETE', `/plans/${activeId}`, 'spv', { reason: 'uji' });
+  assert.equal(blocked.status, 409);
+});
+
+test('Hard delete WO: ditolak bila sudah dipakai Nomor Produksi; WO baru bisa dihapus', async () => {
+  const w = await call('POST', '/work-orders', 'spv', { wo_no: 'WO-HD-1', buyer: 'Uji', target_ton: 5 });
+  const del = await call('DELETE', `/work-orders/${w.data.item.id}`, 'spv', { reason: 'uji hapus' });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+  const used = await call('DELETE', '/work-orders/1', 'spv', { reason: 'uji' });
+  assert.equal(used.status, 409);
+  const denied = await call('DELETE', '/work-orders/1', 'opmd', { reason: 'uji' });
+  assert.equal(denied.status, 403);
+});
+
+test('Progres WO: produksi dihitung dari Bale output x 35 kg, per Nomor Produksi', async () => {
+  const list = await call('GET', '/work-orders', 'spv');
+  const bell = list.data.items.find((w) => w.wo_no === 'WO-BELL-001');
+  assert.ok(bell.plans.length >= 1);
+  assert.equal(bell.produced_kg, bell.produced_bale * 35);
+  assert.ok(bell.progress_pct >= 0);
+});
+
+test('Kode batch B-NNNN: B-0023 dan B-0024 diterima dan dibuat di master batch otomatis', async () => {
+  const p = await call('POST', '/plans', 'spv', planBody('BATCH-23', { batch_sequence: [{ batch_code: 'B-0023', seq: 1 }, { batch_code: 'B-0024', seq: 2 }] }));
+  assert.equal(p.status, 201, JSON.stringify(p.data));
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM batches WHERE code IN ('B-0023','B-0024')").get().n, 2);
+  assert.equal((await call('POST', '/plans', 'spv', planBody('BATCH-X', { batch_sequence: [{ batch_code: 'B-23', seq: 1 }] }))).status, 400);
 });
