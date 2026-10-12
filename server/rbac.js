@@ -7,8 +7,7 @@
 const PERMISSIONS = {
   'dashboard.view': 'Melihat dashboard',
   'plan.view': 'Melihat Production Plan',
-  'plan.write': 'Membuat dan merevisi Production Plan (DRAFT)',
-  'plan.approve': 'Approve, aktivasi, dan close Production Plan',
+  'plan.write': 'Membuat, mengubah, memulai, dan menyelesaikan Nomor Produksi',
   'shift.write': 'Membuka shift, mencatat aktual Mandor, dan menutup shift',
   'trolley.write': 'Mengubah status trolley dan assign Batch',
   'cake.write': 'Mencatat monitoring berat rata-rata Cake',
@@ -51,14 +50,14 @@ const PERMISSIONS = {
 };
 
 const ROLES = {
-  SPV: { name: 'SPV Produksi', perms: ['dashboard.view', 'plan.view', 'plan.write', 'wo.write', 'hard.delete', 'data.edit', 'deleted.view', 'plan.approve', 'dryer.view', 'dryer.stop', 'adjustment.request', 'adjustment.approve', 'exception.approve', 'cutoff.approve', 'correction.request', 'correction.approve', 'report.view', 'report.export'] },
+  SPV: { name: 'SPV Produksi', perms: ['dashboard.view', 'plan.view', 'plan.write', 'wo.write', 'hard.delete', 'data.edit', 'deleted.view', 'dryer.view', 'dryer.stop', 'adjustment.request', 'adjustment.approve', 'exception.approve', 'cutoff.approve', 'correction.request', 'correction.approve', 'report.view', 'report.export'] },
   MANDOR: { name: 'Mandor', perms: ['dashboard.view', 'plan.view', 'dryer.view', 'shift.write', 'trolley.write', 'cake.write', 'movement.write', 'downtime.write', 'downtime.verify', 'handover.write', 'cutoff.verify', 'consumable.write', 'correction.request', 'report.view'] },
   OP_DRYER: { name: 'Operator Dryer', perms: ['plan.view', 'dryer.view', 'dryer.write', 'dryer.stop', 'sampling.write', 'adjustment.request', 'adjustment.execute'] },
   OP_MD: { name: 'Operator Metal Detector', perms: ['plan.view', 'md.challenge', 'md.run', 'bale.write', 'exception.write', 'pallet.write', 'cutoff.request', 'consumable.write', 'correction.request'] },
   QC: { name: 'QC', perms: ['dashboard.view', 'plan.view', 'quality.release', 'report.view', 'report.export'] },
   MANAGER: { name: 'Manager', perms: ['dashboard.view', 'plan.view', 'wo.write', 'period.close', 'data.edit', 'deleted.view', 'consumable.price', 'report.view', 'report.export', 'audit.view'] },
   DIREKTUR: { name: 'Direktur', perms: ['dashboard.view', 'plan.view', 'wo.write', 'period.close', 'data.edit', 'deleted.view', 'report.view', 'report.export', 'audit.view'] },
-  ADMIN: { name: 'Admin Sistem', perms: ['master.write', 'wo.write', 'hard.delete', 'period.close', 'report.export', 'data.edit', 'deleted.view', 'user.manage', 'rbac.manage', 'audit.view', 'plan.view', 'dashboard.view'] },
+  ADMIN: { name: 'Admin Sistem', perms: Object.keys(PERMISSIONS) }, // akses penuh ke seluruh fitur
 };
 
 module.exports = { PERMISSIONS, ROLES };

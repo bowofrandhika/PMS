@@ -699,6 +699,25 @@ function reconcileRbacAndAccounts(db) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(flag, 'done');
 }
 
+// Admin Sistem memiliki akses penuh ke seluruh fitur (satu kali untuk database yang sudah berjalan).
+function grantAdminFullAccess(db) {
+  const flag = 'admin_full_v1';
+  if (db.prepare('SELECT 1 FROM settings WHERE key = ?').get(flag)) return;
+  const perm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_code, permission) VALUES (?, ?)');
+  for (const p of ROLES.ADMIN.perms) perm.run('ADMIN', p);
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(flag, 'done');
+}
+
+// Alur plan tanpa approve: APPROVED lama dikembalikan menjadi DRAFT (BELUM MULAI),
+// dan izin plan.approve dihapus dari semua role.
+function migratePlanTanpaApprove(db) {
+  const flag = 'plan_tanpa_approve_v1';
+  if (db.prepare('SELECT 1 FROM settings WHERE key = ?').get(flag)) return;
+  db.prepare("UPDATE production_plans SET status = 'DRAFT' WHERE status = 'APPROVED'").run();
+  db.prepare("DELETE FROM role_permissions WHERE permission = 'plan.approve'").run();
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(flag, 'done');
+}
+
 function seedSettings(db) {
   const ins = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) ins.run(k, v);
@@ -744,6 +763,8 @@ function openDatabase(file) {
   seedMasterData(db);
   seedUsers(db);
   reconcileRbacAndAccounts(db);
+  grantAdminFullAccess(db);
+  migratePlanTanpaApprove(db);
   return db;
 }
 

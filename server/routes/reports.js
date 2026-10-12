@@ -46,7 +46,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     const planId = req.query.plan_id ? Number(req.query.plan_id) : null;
     const plan = planId ? loadPlan(planId) : D.parsePlan(db.prepare("SELECT * FROM production_plans WHERE status = 'ACTIVE' ORDER BY id DESC LIMIT 1").get());
     const pending = {
-      plans_awaiting_approval: db.prepare("SELECT COUNT(*) AS n FROM production_plans WHERE status = 'DRAFT'").get().n,
+      plans_not_started: db.prepare("SELECT COUNT(*) AS n FROM production_plans WHERE status = 'DRAFT'").get().n,
       cutoffs_awaiting_action: db.prepare("SELECT COUNT(*) AS n FROM batch_cutoffs WHERE status != 'VERIFIED'").get().n,
       adjustments_awaiting_approval: db.prepare("SELECT COUNT(*) AS n FROM process_adjustments WHERE status = 'REQUESTED'").get().n,
       corrections_awaiting_approval: db.prepare("SELECT COUNT(*) AS n FROM corrections WHERE status = 'PENDING'").get().n,

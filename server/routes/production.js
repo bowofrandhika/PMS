@@ -60,18 +60,34 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.status(201).json({ item: plan });
   });
 
+  // Aturan edit: boleh kapan saja kecuali plan sudah SELESAI, riwayat, atau periode sudah ditutup.
+  const PLAN_NO_RE = /^DP[1-3]-\d{6}-\d{3}$/;
+  const checkPlanNo = (value, selfId) => {
+    const no = String(value || '').trim().toUpperCase();
+    if (!PLAN_NO_RE.test(no)) throw badRequest('Nomor Produksi harus format DP{shift}-DDMMYY-NNN, contoh DP1-121026-001');
+    if (db.prepare('SELECT id FROM production_plans WHERE plan_no = ? AND id != ?').get(no, selfId)) throw conflict(`Nomor Produksi ${no} sudah dipakai`);
+    return no;
+  };
+  const assertEditable = (plan) => {
+    if (plan.status === 'CLOSED' || plan.status === 'SUPERSEDED') throw conflict(`Nomor Produksi berstatus ${plan.status} dan tidak dapat diubah`);
+    if (plan.period_id && db.prepare('SELECT status FROM fiscal_periods WHERE id = ?').get(plan.period_id).status === 'CLOSED') {
+      throw conflict('Periode sudah ditutup (tutup buku); data tidak dapat diubah');
+    }
+  };
+
   r.patch('/plans/:id', requireAuth, requirePerm('data.edit'), (req, res) => {
     const plan = loadPlan(Number(req.params.id));
-    if (plan.status !== 'DRAFT') throw conflict('Plan yang sudah APPROVED/ACTIVE tidak dapat diubah langsung. Gunakan revisi plan (versi baru).');
+    assertEditable(plan);
     const norm = D.normalizePlanInput(db, req.body || {}, { HttpError: null, badRequest });
-    // Hanya field yang benar-benar dikirim pada revisi yang menimpa nilai versi sebelumnya.
+    // Hanya field yang benar-benar dikirim yang menimpa nilai lama.
     // Target Bale dan kg saling mengisi: jika salah satunya diubah, keduanya ikut dihitung ulang.
     const targetTouched = req.body.target_bale !== undefined || req.body.target_kg !== undefined;
     const provided = Object.fromEntries(Object.entries(norm).filter(([k]) => req.body[k] !== undefined || (targetTouched && (k === 'target_bale' || k === 'target_kg'))));
     const merged = { ...plan, ...provided };
-    db.prepare(`UPDATE production_plans SET plan_date=?, shift_code=?, work_order=?, product=?, target_bale=?, target_kg=?, target_trolley=?,
+    if (req.body.plan_no !== undefined) merged.plan_no = checkPlanNo(req.body.plan_no, plan.id);
+    db.prepare(`UPDATE production_plans SET plan_no=?, plan_date=?, shift_code=?, work_order=?, product=?, target_bale=?, target_kg=?, target_trolley=?,
       dryers=?, presses=?, sampling_rules=?, cake_interval_min=?, batch_sequence=?, notes=? WHERE id=?`).run(
-      merged.plan_date, merged.shift_code, merged.work_order, merged.product, merged.target_bale, merged.target_kg, merged.target_trolley,
+      merged.plan_no, merged.plan_date, merged.shift_code, merged.work_order, merged.product, merged.target_bale, merged.target_kg, merged.target_trolley,
       JSON.stringify(merged.dryers), JSON.stringify(merged.presses), JSON.stringify(merged.sampling_rules),
       merged.cake_interval_min, JSON.stringify(merged.batch_sequence), merged.notes, plan.id);
     const after = loadPlan(plan.id);
@@ -180,16 +196,24 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.json({ plan_id: plan.id, plan_no: plan.plan_no, items });
   });
 
-  // ---------- Hard delete Nomor Produksi (hanya DRAFT; yang sudah disetujui harus direvisi/ditutup) ----------
+  // ---------- Hard delete Nomor Produksi (hanya jika belum ada data produksi; tetap bisa diedit) ----------
   r.delete('/plans/:id', requireAuth, requirePerm('hard.delete'), (req, res) => {
     const plan = loadPlan(Number(req.params.id));
-    if (plan.status !== 'DRAFT') throw conflict(`Nomor Produksi berstatus ${plan.status}; hanya DRAFT yang dapat dihapus permanen`);
-    if (plan.period_id && db.prepare("SELECT status FROM fiscal_periods WHERE id = ?").get(plan.period_id).status === 'CLOSED') {
+    if (plan.status === 'CLOSED' || plan.status === 'SUPERSEDED') throw conflict(`Nomor Produksi berstatus ${plan.status} dan tidak dapat dihapus`);
+    if (plan.period_id && db.prepare('SELECT status FROM fiscal_periods WHERE id = ?').get(plan.period_id).status === 'CLOSED') {
       throw conflict('Periode sudah ditutup (tutup buku); data tidak dapat dihapus');
+    }
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all().map((x) => x.name);
+    for (const t of tables) {
+      if (t === 'production_plans') continue;
+      if (!db.prepare(`PRAGMA table_info(${t})`).all().some((c) => c.name === 'plan_id')) continue;
+      if (db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE plan_id = ?`).get(plan.id).n > 0) {
+        throw conflict('Nomor Produksi tidak dapat dihapus karena sudah punya data produksi (shift, Dryer, bale, atau sampel). Anda tetap bisa mengubahnya.');
+      }
     }
     const reason = requireString(req.body || {}, 'reason', { max: 300 });
     hardDelete(db, req.user, { entity: 'production_plans', table: 'production_plans', id: plan.id, label: `${plan.plan_no} v${plan.version}`, reason });
-    res.json({ ok: true, note: 'Nomor Produksi DRAFT dihapus permanen (tercatat di riwayat).' });
+    res.json({ ok: true, note: 'Nomor Produksi dihapus permanen (tercatat di riwayat).' });
   });
 
   // ---------- Work Order (WO) ----------
@@ -278,66 +302,26 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.json({ item: after, note: next === 'NONAKTIF' ? 'WO dinonaktifkan; Nomor Produksi lama tetap menyimpan WO ini.' : 'WO diaktifkan kembali.' });
   });
 
-  r.post('/plans/:id/approve', requireAuth, requirePerm('plan.approve'), (req, res) => {
+  // Mulai produksi: BELUM MULAI (DRAFT) -> BERJALAN (ACTIVE). Tanpa approve.
+  r.post('/plans/:id/start', requireAuth, requirePerm('plan.write'), (req, res) => {
     const plan = loadPlan(Number(req.params.id));
-    if (plan.status !== 'DRAFT') throw conflict(`Plan berstatus ${plan.status}, hanya DRAFT yang dapat di-approve`);
+    if (plan.status !== 'DRAFT') throw conflict(`Nomor Produksi berstatus ${plan.status}; hanya BELUM MULAI yang dapat dimulai`);
     const missing = D.planMissingFields(plan, db);
-    if (missing.length) throw unprocessable(`Plan belum lengkap: ${missing.join('; ')}`);
-    if (plan.created_by === req.user.username) throw conflict('Pembuat plan tidak boleh meng-approve plan sendiri (maker-checker)');
-    db.prepare("UPDATE production_plans SET status = 'APPROVED', approved_by = ?, approved_at = ? WHERE id = ?").run(req.user.username, nowIso(), plan.id);
-    const after = loadPlan(plan.id);
-    audit(db, req.user, { action: 'APPROVE', entity: 'production_plans', recordId: plan.id, oldValue: { status: plan.status }, newValue: { status: 'APPROVED' } });
-    res.json({ item: after });
-  });
-
-  r.post('/plans/:id/activate', requireAuth, requirePerm('plan.approve'), (req, res) => {
-    const plan = loadPlan(Number(req.params.id));
-    if (plan.status !== 'APPROVED') throw conflict(`Plan berstatus ${plan.status}, hanya APPROVED yang dapat diaktifkan`);
-    const missing = D.planMissingFields(plan, db);
-    if (missing.length) throw unprocessable(`Plan tidak dapat diaktifkan, field wajib belum lengkap: ${missing.join('; ')}`);
-    // Hanya satu plan ACTIVE pada satu waktu. Plan ACTIVE lain (bukan induk revisi) harus ditutup lebih dulu.
-    const otherActive = db.prepare("SELECT id, plan_no, version FROM production_plans WHERE status = 'ACTIVE' AND id != ? AND id IS NOT ?").get(plan.id, plan.supersedes_id ?? null);
+    if (missing.length) throw unprocessable(`Nomor Produksi tidak dapat dimulai, field wajib belum lengkap: ${missing.join('; ')}`);
+    // Hanya satu plan BERJALAN pada satu waktu.
+    const otherActive = db.prepare("SELECT id, plan_no, version FROM production_plans WHERE status = 'ACTIVE' AND id != ?").get(plan.id);
     if (otherActive) {
-      throw conflict(`Plan #${otherActive.id} (${otherActive.plan_no} v${otherActive.version}) masih ACTIVE. Tutup plan tersebut terlebih dahulu sebelum mengaktifkan plan ini.`);
-    }
-    // Versi induk yang direvisi menjadi SUPERSEDED (data lama tidak ditimpa).
-    if (plan.supersedes_id) {
-      const old = getPlanRow(plan.supersedes_id);
-      db.prepare("UPDATE production_plans SET status = 'SUPERSEDED' WHERE id = ?").run(plan.supersedes_id);
-      audit(db, req.user, { action: 'SUPERSEDE', entity: 'production_plans', recordId: plan.supersedes_id, oldValue: { status: old.status }, newValue: { status: 'SUPERSEDED', superseded_by: plan.id } });
+      throw conflict(`Plan #${otherActive.id} (${otherActive.plan_no} v${otherActive.version}) masih BERJALAN. Selesaikan plan tersebut terlebih dahulu.`);
     }
     db.prepare("UPDATE production_plans SET status = 'ACTIVE', activated_by = ?, activated_at = ? WHERE id = ?").run(req.user.username, nowIso(), plan.id);
-    audit(db, req.user, { action: 'ACTIVATE', entity: 'production_plans', recordId: plan.id, newValue: { status: 'ACTIVE' } });
+    audit(db, req.user, { action: 'START', entity: 'production_plans', recordId: plan.id, oldValue: { status: 'DRAFT' }, newValue: { status: 'ACTIVE' } });
     res.json({ item: loadPlan(plan.id) });
   });
 
-  r.post('/plans/:id/revise', requireAuth, requirePerm('plan.write'), (req, res) => {
+  // Selesai: BERJALAN (ACTIVE) -> SELESAI (CLOSED). Diperlukan agar tutup buku bisa dilakukan.
+  r.post('/plans/:id/close', requireAuth, requirePerm('plan.write'), (req, res) => {
     const plan = loadPlan(Number(req.params.id));
-    if (!['APPROVED', 'ACTIVE'].includes(plan.status)) throw conflict('Revisi hanya dapat dibuat dari plan APPROVED atau ACTIVE');
-    const reason = requireString(req.body || {}, 'reason', { max: 500 });
-    const norm = D.normalizePlanInput(db, req.body || {}, { HttpError: null, badRequest });
-    // Hanya field yang benar-benar dikirim pada revisi yang menimpa nilai versi sebelumnya.
-    // Target Bale dan kg saling mengisi: jika salah satunya diubah, keduanya ikut dihitung ulang.
-    const targetTouched = req.body.target_bale !== undefined || req.body.target_kg !== undefined;
-    const provided = Object.fromEntries(Object.entries(norm).filter(([k]) => req.body[k] !== undefined || (targetTouched && (k === 'target_bale' || k === 'target_kg'))));
-    const merged = { ...plan, ...provided };
-    const info = db.prepare(`INSERT INTO production_plans
-      (plan_no, version, supersedes_id, status, plan_date, shift_code, work_order, product, target_bale, target_kg, target_trolley,
-       dryers, presses, sampling_rules, cake_interval_min, batch_sequence, notes, revision_reason, created_by, created_at)
-      VALUES (?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      plan.plan_no, plan.version + 1, plan.id, merged.plan_date, merged.shift_code, merged.work_order, merged.product,
-      merged.target_bale, merged.target_kg, merged.target_trolley, JSON.stringify(merged.dryers), JSON.stringify(merged.presses),
-      JSON.stringify(merged.sampling_rules), merged.cake_interval_min, JSON.stringify(merged.batch_sequence), merged.notes,
-      reason, req.user.username, nowIso());
-    const created = loadPlan(Number(info.lastInsertRowid));
-    db.prepare('UPDATE production_plans SET period_id = ?, seq_no = ? WHERE id = ?').run(plan.period_id, plan.seq_no, created.id);
-    audit(db, req.user, { action: 'REVISE', entity: 'production_plans', recordId: created.id, oldValue: { id: plan.id, version: plan.version }, newValue: { id: created.id, version: created.version }, reason });
-    res.status(201).json({ item: created });
-  });
-
-  r.post('/plans/:id/close', requireAuth, requirePerm('plan.approve'), (req, res) => {
-    const plan = loadPlan(Number(req.params.id));
-    if (plan.status !== 'ACTIVE') throw conflict('Hanya plan ACTIVE yang dapat ditutup');
+    if (plan.status !== 'ACTIVE') throw conflict('Hanya Nomor Produksi yang BERJALAN dapat diselesaikan');
     const openShift = db.prepare("SELECT id FROM shifts WHERE plan_id = ? AND status = 'OPEN'").get(plan.id);
     if (openShift) throw conflict('Masih ada shift yang OPEN untuk plan ini');
     db.prepare("UPDATE production_plans SET status = 'CLOSED', closed_at = ? WHERE id = ?").run(nowIso(), plan.id);

@@ -81,7 +81,7 @@ test('RBAC: operator MD tidak dapat membuat Production Plan; QC tidak dapat star
 });
 
 let planId;
-test('plan: DRAFT dibuat, approver tidak boleh sama dengan pembuat (maker-checker), lalu ACTIVE', async () => {
+test('plan: BELUM MULAI dibuat, lalu dimulai SPV (tanpa approve) menjadi BERJALAN', async () => {
   const c = await call('POST', '/plans', 'spv', {
     plan_date: '2026-10-12', shift_code: '1', work_order: 'WO-BELL-001', product: 'SIR20',
     target_bale: 200, dryers: ['DRY-A'], presses: ['PRS-A'], cake_interval_min: 30,
@@ -90,28 +90,10 @@ test('plan: DRAFT dibuat, approver tidak boleh sama dengan pembuat (maker-checke
   assert.equal(c.status, 201, JSON.stringify(c.data));
   planId = c.data.item.id;
   assert.equal(c.data.item.status, 'DRAFT');
-
-  const self = await call('POST', `/plans/${planId}/approve`, 'spv', {});
-  assert.equal(self.status, 409, 'pembuat tidak boleh approve sendiri');
-
-  const ap = await call('POST', `/plans/${planId}/approve`, 'spv2', {});
-  assert.equal(ap.status, 200, JSON.stringify(ap.data));
-  const act = await call('POST', `/plans/${planId}/activate`, 'spv2', {});
+  assert.equal((await call('POST', `/plans/${planId}/approve`, 'spv2', {})).status, 404, 'tidak ada alur approve');
+  const act = await call('POST', `/plans/${planId}/start`, 'spv', {});
   assert.equal(act.status, 200, JSON.stringify(act.data));
   assert.equal(act.data.item.status, 'ACTIVE');
-});
-
-test('plan: revisi membuat versi baru dan induk menjadi SUPERSEDED (tidak ditimpa)', async () => {
-  const rev = await call('POST', `/plans/${planId}/revise`, 'spv', { reason: 'Tambah target', target_bale: 220 });
-  assert.equal(rev.status, 201, JSON.stringify(rev.data));
-  const newId = rev.data.item.id;
-  const ap = await call('POST', `/plans/${newId}/approve`, 'spv2', {});
-  assert.equal(ap.status, 200);
-  const act = await call('POST', `/plans/${newId}/activate`, 'spv2', {});
-  assert.equal(act.status, 200, JSON.stringify(act.data));
-  const old = await call('GET', `/plans/${planId}`, 'spv');
-  assert.equal(old.data.item.status, 'SUPERSEDED');
-  planId = newId;
 });
 
 test('Shift Mandor: buka shift, FILLING mengubah trolley, handover, lalu tutup', async () => {

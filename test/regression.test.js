@@ -42,8 +42,7 @@ async function createActivePlan(no) {
   const c = await call('POST', '/plans', 'spv', planBody(no));
   assert.equal(c.status, 201, JSON.stringify(c.data));
   const id = c.data.item.id;
-  assert.equal((await call('POST', `/plans/${id}/approve`, 'spv2', {})).status, 200);
-  const a = await call('POST', `/plans/${id}/activate`, 'spv2', {});
+  const a = await call('POST', `/plans/${id}/start`, 'spv', {});
   assert.equal(a.status, 200, JSON.stringify(a.data));
   return id;
 }
@@ -90,13 +89,12 @@ test('B-02: plan kedua tidak dapat diaktifkan selama plan lain masih ACTIVE', as
   assert.ok(firstRow);
   const c = await call('POST', '/plans', 'spv', planBody('REG-ACT-2'));
   const second = c.data.item.id;
-  await call('POST', `/plans/${second}/approve`, 'spv2', {});
-  const blocked = await call('POST', `/plans/${second}/activate`, 'spv2', {});
+  const blocked = await call('POST', `/plans/${second}/start`, 'spv', {});
   assert.equal(blocked.status, 409, JSON.stringify(blocked.data));
-  assert.match(blocked.data.error, /masih ACTIVE/);
+  assert.match(blocked.data.error, /masih BERJALAN/);
 
   assert.equal((await call('POST', `/plans/${first}/close`, 'spv2', {})).status, 200);
-  const ok = await call('POST', `/plans/${second}/activate`, 'spv2', {});
+  const ok = await call('POST', `/plans/${second}/start`, 'spv', {});
   assert.equal(ok.status, 200, JSON.stringify(ok.data));
 });
 
@@ -123,11 +121,11 @@ test('B-08: akun nonaktif dengan password salah dijawab 401 (status akun tidak b
   }
 });
 
-test('B-04: dashboard menghitung semua plan DRAFT yang menunggu approval, tanpa batas tanggal', async () => {
-  const before = (await call('GET', '/dashboard', 'spv')).data.pending.plans_awaiting_approval;
+test('B-04: dashboard menghitung semua Nomor Produksi BELUM MULAI, tanpa batas tanggal', async () => {
+  const before = (await call('GET', '/dashboard', 'spv')).data.pending.plans_not_started;
   const c = await call('POST', '/plans', 'spv', planBody('REG-OLD', { plan_date: '2026-01-01' }));
   assert.equal(c.status, 201);
-  const after = (await call('GET', '/dashboard', 'spv')).data.pending.plans_awaiting_approval;
+  const after = (await call('GET', '/dashboard', 'spv')).data.pending.plans_not_started;
   assert.equal(after, before + 1);
 });
 
@@ -435,7 +433,7 @@ test('Edit: plan DRAFT dan WO diubah SPV; operator ditolak; plan non-DRAFT tidak
   assert.equal((await call('PATCH', `/plans/${id}`, 'opdryer', { target_bale: 5 })).status, 403);
   assert.equal((await call('PATCH', `/plans/${id}`, 'mandor', { target_bale: 5 })).status, 403);
   const activeId = db.prepare("SELECT id FROM production_plans WHERE status = 'ACTIVE' LIMIT 1").get().id;
-  assert.equal((await call('PATCH', `/plans/${activeId}`, 'spv', { target_bale: 5 })).status, 409);
+  assert.equal((await call('PATCH', `/plans/${activeId}`, 'spv', { target_bale: 5 })).status, 200, 'plan BERJALAN boleh diedit');
   const w = await call('POST', '/work-orders', 'spv', { wo_no: 'WO-EDIT-1', buyer: 'Awal', target_ton: 10 });
   const wu = await call('PATCH', `/work-orders/${w.data.item.id}`, 'admin', { buyer: 'Baru', target_ton: 15 });
   assert.equal(wu.status, 200, JSON.stringify(wu.data));
@@ -463,4 +461,26 @@ test('Riwayat: SPV boleh melihat; operator ditolak; pencarian, paginasi, dan riw
   assert.equal(h.data.deleted.length, 1);
   assert.ok(h.data.audit.some((x) => x.action === 'CREATE'));
   assert.equal((await call('GET', '/history?entity=production_plans', 'spv')).status, 400);
+});
+
+test('Nomor Produksi: nomor bisa diedit (format dicek, tidak boleh dobel); tidak bisa dihapus jika sudah ada data produksi; admin punya semua izin', async () => {
+  const { PERMISSIONS, ROLES } = require('../server/rbac');
+  assert.equal(PERMISSIONS['plan.approve'], undefined, 'tidak ada izin approve');
+  for (const p of Object.keys(PERMISSIONS)) assert.ok(ROLES.ADMIN.perms.includes(p), `admin harus punya ${p}`);
+  const c = await call('POST', '/plans', 'spv', planBody('REG-NO-1'));
+  const id = c.data.item.id;
+  const bad = await call('PATCH', `/plans/${id}`, 'spv', { plan_no: 'XX-1' });
+  assert.equal(bad.status, 400);
+  const ok = await call('PATCH', `/plans/${id}`, 'spv', { plan_no: 'dp2-131026-077' });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+  assert.equal(ok.data.item.plan_no, 'DP2-131026-077');
+  const other = await call('POST', '/plans', 'spv', planBody('REG-NO-2'));
+  const dup = await call('PATCH', `/plans/${other.data.item.id}`, 'spv', { plan_no: 'DP2-131026-077' });
+  assert.equal(dup.status, 409);
+  const withData = db.prepare('SELECT plan_id FROM shifts LIMIT 1').get();
+  if (withData) {
+    const del = await call('DELETE', `/plans/${withData.plan_id}`, 'admin', { reason: 'uji' });
+    assert.equal(del.status, 409, 'plan dengan data produksi tidak boleh dihapus');
+  }
+  assert.equal((await call('DELETE', `/plans/${id}`, 'admin', { reason: 'uji hapus plan tanpa data' })).status, 200);
 });
