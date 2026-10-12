@@ -2,7 +2,7 @@
 
 const express = require('express');
 const { nowIso } = require('../db');
-const { badRequest, notFound, conflict, unprocessable, audit, requireString, requireNumber, requireEnum, optionalTime } = require('../http');
+const { badRequest, notFound, conflict, unprocessable, audit, requireString, requireNumber, requireEnum, optionalTime, isIsoDateTime } = require('../http');
 const D = require('../domain');
 
 function buildRouter(db, { requireAuth, requirePerm, setTrolleyStatus, loadPlan }) {
@@ -207,6 +207,7 @@ function buildRouter(db, { requireAuth, requirePerm, setTrolleyStatus, loadPlan 
     const seqOf = db.prepare("SELECT MIN(id) AS first_in FROM dryer_events WHERE run_id = ? AND kind = 'TROLLEY_IN' AND trolley_code = ?").get(run.id, code);
     if (!seqOf.first_in) throw conflict(`Trolley ${code} belum pernah masuk Dryer Run ini`);
     const trolleySeq = db.prepare("SELECT COUNT(*) AS n FROM dryer_events WHERE run_id = ? AND kind = 'TROLLEY_IN' AND id <= ?").get(run.id, seqOf.first_in).n;
+    if (b.planned_at && !isIsoDateTime(b.planned_at)) throw badRequest('planned_at harus berupa tanggal/waktu ISO 8601');
     const planned = b.planned_at ? new Date(b.planned_at).toISOString() : null;
     const actual = optionalTime(b, 'actual_at');
     const info = db.prepare(`INSERT INTO cake_samples (run_id, plan_id, trolley_code, trolley_seq, planned_at, actual_at, ad_hoc, reason, p0, mv, pri, remark, by)

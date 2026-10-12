@@ -100,13 +100,15 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     const user = db.prepare('SELECT * FROM users WHERE lower(username) = lower(?)').get(username);
     const genericError = new HttpError(401, 'Username atau password salah');
     if (!user) throw genericError;
-    if (!user.active) throw new HttpError(403, 'Akun dinonaktifkan. Hubungi Admin Sistem.');
     if (user.locked_until && new Date(user.locked_until) > new Date()) {
       throw new HttpError(423, `Akun terkunci sampai ${user.locked_until}. Hubungi Admin atau tunggu.`);
     }
+    // Password diperiksa sebelum status akun, agar status (nonaktif) tidak bocor ke pihak yang tidak tahu password.
     if (!verifyPassword(password, user.password_hash)) {
       const threshold = settingNumber(db, 'lockout_threshold') || 5;
-      const attempts = user.failed_attempts + 1;
+      // Lock yang sudah kedaluwarsa dihitung mulai dari nol (jika tidak, satu kesalahan langsung mengunci lagi).
+      const lockExpired = user.locked_until && new Date(user.locked_until) <= new Date();
+      const attempts = (lockExpired ? 0 : user.failed_attempts) + 1;
       let lockedUntil = null;
       if (attempts >= threshold) {
         lockedUntil = new Date(Date.now() + (settingNumber(db, 'lockout_minutes') || 15) * 60000).toISOString();
@@ -115,6 +117,7 @@ function buildRouter(db, { requireAuth, requirePerm }) {
       audit(db, { id: user.id, username, roles: [] }, { action: 'LOGIN_FAILED', entity: 'users', recordId: user.id });
       throw genericError;
     }
+    if (!user.active) throw new HttpError(403, 'Akun dinonaktifkan. Hubungi Admin Sistem.');
     db.prepare('UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = ?').run(user.id);
     const token = crypto.randomBytes(32).toString('hex');
     db.prepare('INSERT INTO sessions (token, user_id, created_at, last_seen) VALUES (?, ?, ?, ?)').run(token, user.id, nowIso(), nowIso());

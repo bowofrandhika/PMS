@@ -91,6 +91,11 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     if (plan.status !== 'APPROVED') throw conflict(`Plan berstatus ${plan.status}, hanya APPROVED yang dapat diaktifkan`);
     const missing = D.planMissingFields(plan, db);
     if (missing.length) throw unprocessable(`Plan tidak dapat diaktifkan, field wajib belum lengkap: ${missing.join('; ')}`);
+    // Hanya satu plan ACTIVE pada satu waktu. Plan ACTIVE lain (bukan induk revisi) harus ditutup lebih dulu.
+    const otherActive = db.prepare("SELECT id, plan_no, version FROM production_plans WHERE status = 'ACTIVE' AND id != ? AND id IS NOT ?").get(plan.id, plan.supersedes_id ?? null);
+    if (otherActive) {
+      throw conflict(`Plan #${otherActive.id} (${otherActive.plan_no} v${otherActive.version}) masih ACTIVE. Tutup plan tersebut terlebih dahulu sebelum mengaktifkan plan ini.`);
+    }
     // Versi induk yang direvisi menjadi SUPERSEDED (data lama tidak ditimpa).
     if (plan.supersedes_id) {
       const old = getPlanRow(plan.supersedes_id);

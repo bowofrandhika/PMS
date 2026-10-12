@@ -130,6 +130,7 @@ function normalizePlanInput(db, b, { HttpError, badRequest }) {
   if (b.sampling_rules != null) {
     if (!Array.isArray(b.sampling_rules)) throw badRequest('sampling_rules harus berupa array');
     out.sampling_rules = b.sampling_rules.map((rule) => {
+      if (!rule || typeof rule !== 'object') throw badRequest('Setiap sampling rule harus berupa objek');
       if (!SAMPLING_RULE_TYPES.includes(rule.type)) throw badRequest(`Tipe sampling tidak dikenal: ${rule.type}`);
       if (rule.type === 'TIME_INTERVAL') {
         const interval = Number(rule.interval_min);
@@ -154,6 +155,7 @@ function normalizePlanInput(db, b, { HttpError, badRequest }) {
   if (b.batch_sequence != null) {
     if (!Array.isArray(b.batch_sequence)) throw badRequest('batch_sequence harus berupa array');
     out.batch_sequence = b.batch_sequence.map((item, idx) => {
+      if (!item || typeof item !== 'object') throw badRequest('Setiap item batch_sequence harus berupa objek');
       const code = String(item.batch_code || '').trim();
       if (!code) throw badRequest('Setiap item batch_sequence wajib memiliki batch_code');
       if (!db.prepare('SELECT id FROM batches WHERE code = ?').get(code)) throw badRequest(`Batch tidak ditemukan: ${code}`);

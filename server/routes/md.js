@@ -17,6 +17,12 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     if (!p) throw notFound('Pallet');
     return p;
   };
+  // Pallet yang dirujuk harus milik plan yang sama (mencegah data lintas plan tercampur).
+  const loadPalletOfPlan = (id, plan) => {
+    const p = loadPallet(id);
+    if (p.plan_id !== plan.id) throw badRequest(`Pallet ${id} bukan milik plan #${plan.id}`);
+    return p;
+  };
 
   // Batch aktif = Batch hasil Batch Cutoff terakhir yang sudah VERIFIED, atau urutan pertama plan.
   function activeBatch(plan) {
@@ -187,7 +193,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     if (b.batch_code && String(b.batch_code) !== batch) {
       throw conflict(`Batch aktif adalah ${batch}. Pergantian Batch harus melalui Batch Cutoff yang diverifikasi Mandor.`);
     }
-    let pallet = b.pallet_id ? loadPallet(Number(b.pallet_id)) : currentPallet(plan, 'OK');
+    let pallet = b.pallet_id ? loadPalletOfPlan(Number(b.pallet_id), plan) : currentPallet(plan, 'OK');
     if (!pallet) pallet = createPallet(plan, req.user, { location: 'Area Palletizing' });
     if (!['OPEN', 'PARTIAL'].includes(pallet.status)) throw conflict(`Pallet ${pallet.id} berstatus ${pallet.status}; buat pallet baru`);
     if (pallet.ok_count + qty > pallet.max_bale) {
@@ -223,9 +229,14 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     const location = isReject ? 'Area Reject (segregasi)' : (b.location ? String(b.location).slice(0, 120) : 'Area Hold');
 
     let pallet = null;
+    let rejectPalletId = null;
+    if (isReject && b.pallet_id) {
+      // MD-003: exception menyimpan pallet. Reject tidak mengisi slot pallet OK dan tidak menambah komposisi (BR-016).
+      rejectPalletId = loadPalletOfPlan(Number(b.pallet_id), plan).id;
+    }
     if (!isReject) {
       // Hold tetap mengisi slot pallet (PAL-005) dengan composition status Hold.
-      pallet = b.pallet_id ? loadPallet(Number(b.pallet_id)) : currentPallet(plan, category);
+      pallet = b.pallet_id ? loadPalletOfPlan(Number(b.pallet_id), plan) : currentPallet(plan, category);
       if (!pallet) pallet = createPallet(plan, req.user, { location: 'Area Hold' });
       if (!['OPEN', 'PARTIAL', 'HOLD/REJECT'].includes(pallet.status)) throw conflict(`Pallet ${pallet.id} berstatus ${pallet.status}`);
       if (pallet.status === 'HOLD/REJECT' && pallet.status_category !== category && pallet.status_category !== null) {
@@ -238,7 +249,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     }
 
     const info = db.prepare(`INSERT INTO bale_events (plan_id, pallet_id, batch_code, category, gross_qty, reject_qty, chamber_code, metal_type, location, remark, at, by)
-      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`).run(plan.id, pallet ? pallet.id : null, batch, category, isReject ? 1 : 0,
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`).run(plan.id, pallet ? pallet.id : rejectPalletId, batch, category, isReject ? 1 : 0,
       chamber, metal, location, b.remark || null, at, req.user.username);
     const eventId = Number(info.lastInsertRowid);
     if (pallet) {
@@ -278,6 +289,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     if (newBatch === oldBatch) throw unprocessable('Batch baru sama dengan Batch aktif');
     if (!db.prepare('SELECT id FROM batches WHERE code = ?').get(newBatch)) throw badRequest(`Batch tidak ditemukan: ${newBatch}`);
     const boundary = requireNumber(b, 'boundary_count', { integer: true, min: 0 });
+    if (b.pallet_id) loadPalletOfPlan(Number(b.pallet_id), plan);
     const offPlan = !plan.batch_sequence.some((x) => x.batch_code === newBatch);
     const info = db.prepare(`INSERT INTO batch_cutoffs (plan_id, pallet_id, old_batch_code, new_batch_code, boundary_count, off_plan, status, requested_by, requested_at)
       VALUES (?, ?, ?, ?, ?, ?, 'REQUESTED', ?, ?)`).run(plan.id, b.pallet_id ? Number(b.pallet_id) : null, oldBatch, newBatch, boundary, offPlan ? 1 : 0, req.user.username, nowIso());

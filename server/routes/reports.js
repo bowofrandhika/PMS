@@ -46,7 +46,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     const planId = req.query.plan_id ? Number(req.query.plan_id) : null;
     const plan = planId ? loadPlan(planId) : D.parsePlan(db.prepare("SELECT * FROM production_plans WHERE status = 'ACTIVE' ORDER BY id DESC LIMIT 1").get());
     const pending = {
-      plans_awaiting_approval: db.prepare("SELECT COUNT(*) AS n FROM production_plans WHERE status = 'DRAFT' AND plan_date >= date('now','-1 day')").get().n,
+      plans_awaiting_approval: db.prepare("SELECT COUNT(*) AS n FROM production_plans WHERE status = 'DRAFT'").get().n,
       cutoffs_awaiting_action: db.prepare("SELECT COUNT(*) AS n FROM batch_cutoffs WHERE status != 'VERIFIED'").get().n,
       adjustments_awaiting_approval: db.prepare("SELECT COUNT(*) AS n FROM process_adjustments WHERE status = 'REQUESTED'").get().n,
       corrections_awaiting_approval: db.prepare("SELECT COUNT(*) AS n FROM corrections WHERE status = 'PENDING'").get().n,
@@ -95,9 +95,10 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
     }
     const a = plannedMin && plannedMin > 0 && openTimer === 0 ? actualTimer / plannedMin : null;
     const p = ideal > 0 && openTimer === 0 ? outCount / ideal : null;
-    const bales = db.prepare('SELECT category FROM bale_events WHERE plan_id = ?').all(plan.id);
-    const gross = bales.length;
-    const good = bales.filter((b) => b.category === 'OK').length + db.prepare("SELECT COUNT(*) AS n FROM quality_exceptions qe JOIN bale_events be ON be.id = qe.bale_event_id WHERE be.plan_id = ? AND qe.qc_decision = 'RELEASE_GOOD'").get(plan.id).n;
+    // Gross/Good dihitung dari jumlah Bale (gross_qty), bukan jumlah baris event (count OK bisa berisi banyak Bale).
+    const gross = db.prepare('SELECT COALESCE(SUM(gross_qty), 0) AS n FROM bale_events WHERE plan_id = ?').get(plan.id).n;
+    const good = db.prepare("SELECT COALESCE(SUM(gross_qty), 0) AS n FROM bale_events WHERE plan_id = ? AND category = 'OK'").get(plan.id).n
+      + db.prepare("SELECT COALESCE(SUM(be.gross_qty), 0) AS n FROM quality_exceptions qe JOIN bale_events be ON be.id = qe.bale_event_id WHERE be.plan_id = ? AND qe.qc_decision = 'RELEASE_GOOD'").get(plan.id).n;
     const qcDecisions = db.prepare('SELECT COUNT(*) AS n FROM quality_exceptions qe JOIN bale_events be ON be.id = qe.bale_event_id WHERE be.plan_id = ? AND qe.qc_decision IS NOT NULL').get(plan.id).n;
     const q = gross > 0 && qcDecisions > 0 ? good / gross : null;
     const missing = [];
@@ -133,7 +134,7 @@ function buildRouter(db, { requireAuth, requirePerm, loadPlan }) {
 
   // ---------- Consumable & energy ----------
   r.get('/consumables', requireAuth, requirePerm('dashboard.view'), (req, res) => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = D.jakartaDate();
     const items = db.prepare('SELECT * FROM consumables WHERE active = 1 ORDER BY id').all().map((c) => {
       const price = priceAsOf(c.id, today);
       return { ...c, current_price: price ? price.price : null, price_status: price ? 'OK' : 'PRICE NOT SET' };
