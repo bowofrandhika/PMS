@@ -484,3 +484,26 @@ test('Nomor Produksi: nomor bisa diedit (format dicek, tidak boleh dobel); tidak
   }
   assert.equal((await call('DELETE', `/plans/${id}`, 'admin', { reason: 'uji hapus plan tanpa data' })).status, 200);
 });
+
+test('Shift mengikuti tanggal Nomor Produksi; plan SELESAI tetap bisa diedit dan tanggal shift ikut pindah', async () => {
+  db.prepare("UPDATE production_plans SET status = 'CLOSED' WHERE status = 'ACTIVE'").run();
+  const id = await createActivePlan('REG-SYNC-1');
+  const bad = await call('POST', '/shifts', 'mandor', { plan_id: id, shift_date: '2030-01-01', shift_code: '1' });
+  assert.equal(bad.status, 400, JSON.stringify(bad.data));
+  const sh = await call('POST', '/shifts', 'mandor', { plan_id: id });
+  assert.equal(sh.status, 201, JSON.stringify(sh.data));
+  const shiftId = sh.data.item.id;
+  db.prepare("UPDATE production_plans SET status = 'CLOSED' WHERE id = ?").run(id);
+  const ed = await call('PATCH', `/plans/${id}`, 'spv', { plan_date: '2026-10-20' });
+  assert.equal(ed.status, 200, JSON.stringify(ed.data));
+  assert.equal(ed.data.synced_shifts, 1);
+  assert.equal(ed.data.item.status, 'CLOSED', 'status tetap SELESAI');
+  assert.equal(db.prepare('SELECT shift_date FROM shifts WHERE id = ?').get(shiftId).shift_date, '2026-10-20');
+  const ren = await call('PATCH', `/plans/${id}`, 'spv', { plan_no: 'DP1-201026-901' });
+  assert.equal(ren.status, 200, JSON.stringify(ren.data));
+  const again = await call('POST', `/plans/${id}/sync-shifts`, 'spv', {});
+  assert.equal(again.status, 200);
+  assert.equal(again.data.synced_shifts, 0);
+  const audit = db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'SYNC' AND entity = 'shifts' AND record_id = ?").get(String(shiftId)).n;
+  assert.equal(audit, 1, 'perpindahan shift tercatat di audit');
+});

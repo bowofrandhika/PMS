@@ -421,6 +421,7 @@
       ${wos.length ? '' : '<div class="msg info">Belum ada Work Order aktif. Tambahkan di menu Work Order.</div>'}
       <form class="inline" data-form="${isEdit ? 'planEdit' : 'planCreate'}">
         ${isEdit ? field('plan_no', 'Nomor Produksi (ubah jika salah input)', { required: true, value: v.plan_no }) : ''}
+        ${isEdit ? '<p class="muted" style="font-size:12px;flex-basis:100%">Mengubah tanggal atau shift akan memindahkan semua shift milik Nomor Produksi ini. Waktu kejadian aktual (trolley, bale, Dryer) tidak diubah.</p>' : ''}
         ${field('plan_date', 'Tanggal produksi', { required: true, type: 'date', value: v.plan_date || new Date().toISOString().slice(0, 10) })}
         ${field('shift_code', 'Shift', { required: true, select: ['1', '2', '3'], value: v.shift_code || '1' })}
         ${field('work_order', 'Work Order (WO)', { required: true, value: v.work_order || '', select: wos.map((w) => ({ value: w.wo_no, label: `${w.wo_no} · ${w.buyer} · ${w.target_ton} ton` })) })}
@@ -449,13 +450,14 @@
     S.plans = plans;
     const canWrite = has('plan.write');
     const wos = canWrite ? (await api('GET', '/work-orders')).items.filter((w) => w.status === 'ACTIVE') : [];
-    const editing = S.editPlanId ? plans.find((p) => p.id === S.editPlanId && ['DRAFT', 'ACTIVE'].includes(p.status)) : null;
+    const editing = S.editPlanId ? plans.find((p) => p.id === S.editPlanId) : null;
     if (S.editPlanId && !editing) S.editPlanId = null;
     const rows = plans.map((p) => {
       const acts = [];
-      if (has('data.edit') && ['DRAFT', 'ACTIVE'].includes(p.status)) acts.push(`<button class="btn sec" data-act="editPlan" data-id="${p.id}">Ubah</button>`);
+      if (has('data.edit')) acts.push(`<button class="btn sec" data-act="editPlan" data-id="${p.id}">Ubah</button>`);
+      if (has('data.edit')) acts.push(`<button class="btn sec" data-api="POST|/plans/:id/sync-shifts" data-id="${p.id}" data-ok="Shift disinkronkan dengan Nomor Produksi." title="Samakan tanggal dan shift semua shift dengan Nomor Produksi ini">Sinkron shift</button>`);
       if (has('deleted.view')) acts.push(`<button class="btn sec" data-act="openHist" data-entity="production_plans" data-id="${p.id}" data-label="${esc(p.plan_no)}">Riwayat</button>`);
-      if (has('hard.delete') && p.status !== 'CLOSED' && p.status !== 'SUPERSEDED') acts.push(`<button class="btn bad" data-api="DELETE|/plans/:id" data-id="${p.id}" data-field="reason" data-prompt="Alasan hapus permanen (tercatat di riwayat):" data-confirm="Hapus permanen Nomor Produksi DRAFT ini?" data-ok="Nomor Produksi dihapus permanen (tersimpan di riwayat).">Hapus</button>`);
+      if (has('hard.delete')) acts.push(`<button class="btn bad" data-api="DELETE|/plans/:id" data-id="${p.id}" data-field="reason" data-prompt="Alasan hapus permanen (tercatat di riwayat):" data-confirm="Hapus permanen Nomor Produksi DRAFT ini?" data-ok="Nomor Produksi dihapus permanen (tersimpan di riwayat).">Hapus</button>`);
       if (canWrite && p.status === 'DRAFT') acts.push(`<button class="btn" data-api="POST|/plans/:id/start" data-id="${p.id}" data-confirm="Mulai produksi plan ini? Statusnya menjadi BERJALAN." data-ok="Produksi dimulai.">Mulai produksi</button>`);
       if (canWrite && p.status === 'ACTIVE') acts.push(`<button class="btn warn" data-api="POST|/plans/:id/close" data-id="${p.id}" data-confirm="Selesaikan plan ini? Setelah selesai tidak bisa berjalan lagi." data-ok="Plan diselesaikan.">Selesai</button>`);
       return tr([`<button class="link" data-act="select" data-key="plan" data-id="${p.id}">#${p.id}</button>`, esc(p.plan_no), fmt(p.version), `<span class="badge ${statusCls(p.status)}">${esc(PLAN_STATUS[p.status] || p.status)}</span>`, esc(p.plan_date), esc(p.shift_code), esc(p.work_order || '—'), esc(p.product), fmt(p.target_bale), esc(p.dryers.join(', ')), esc(p.presses.join(', ')), acts.join(' ')]);
@@ -475,7 +477,7 @@
     return `
       <h1>Nomor Produksi</h1>
       ${table(['ID', 'Nomor Produksi', 'Versi', 'Status', 'Tanggal', 'Shift', 'Work Order', 'Grade', 'Target Bale', 'Dryer', 'Press', 'Aksi'], rows)}
-      <p class="muted" style="font-size:12px">Alur: BELUM MULAI → Mulai produksi → BERJALAN → Selesai → SELESAI. Nomor Produksi boleh diubah kapan saja (termasuk nomornya bila salah input); setiap perubahan tercatat di Riwayat. Hapus hanya jika belum ada data produksi.</p>
+      <p class="muted" style="font-size:12px">Alur: BELUM MULAI → Mulai produksi → BERJALAN → Selesai → SELESAI. Nomor Produksi boleh diubah kapan saja, termasuk setelah SELESAI (nomor, tanggal, shift). Perubahan tanggal atau shift ikut memindahkan shift terkait. Setiap perubahan tercatat di Riwayat. Hapus hanya jika belum ada data produksi.</p>
       ${canWrite && !editing ? `<h2>Buat Nomor Produksi baru</h2>${planFormHtml(null, wos)}` : ''}
       ${canWrite && editing ? `<h2>Ubah Nomor Produksi ${esc(editing.plan_no)}</h2>${planFormHtml(editing, wos)}<button class="btn sec" data-act="cancelEdit" type="button">Batal ubah</button>` : ''}
       <h2>Kesiapan alat (Nomor Produksi terpilih)</h2>
@@ -593,7 +595,7 @@
     return `
       <h1>Shift Mandor</h1>
       ${has('shift.write') ? `<form class="inline card" data-form="shiftOpen">
-        ${field('shift_date', 'Tanggal shift', { type: 'date', required: true, value: new Date().toISOString().slice(0, 10) })}
+        <p class="muted" style="font-size:12px;flex-basis:100%">Tanggal shift mengikuti tanggal Nomor Produksi aktif. Untuk mengubah tanggal, edit Nomor Produksi.</p>
         ${field('shift_code', 'Kode shift', { required: true, value: '1' })}
         <button class="btn" type="submit">Buka shift</button></form>` : ''}
       ${table(['ID', 'Tanggal', 'Shift', 'Status', 'Dibuka oleh'], rows)}

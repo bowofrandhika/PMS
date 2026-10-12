@@ -69,10 +69,33 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     return no;
   };
   const assertEditable = (plan) => {
-    if (plan.status === 'CLOSED' || plan.status === 'SUPERSEDED') throw conflict(`Nomor Produksi berstatus ${plan.status} dan tidak dapat diubah`);
     if (plan.period_id && db.prepare('SELECT status FROM fiscal_periods WHERE id = ?').get(plan.period_id).status === 'CLOSED') {
       throw conflict('Periode sudah ditutup (tutup buku); data tidak dapat diubah');
     }
+  };
+
+  // Sinkron: semua shift milik plan mengikuti tanggal dan shift plan. Setiap perpindahan dicatat di audit.
+  const syncShiftsToPlan = (plan, user) => {
+    let changed = 0;
+    for (const sh of db.prepare('SELECT * FROM shifts WHERE plan_id = ? ORDER BY id').all(plan.id)) {
+      if (sh.shift_date === plan.plan_date && sh.shift_code === plan.shift_code) continue;
+      if (sh.status === 'OPEN') {
+        const clash = db.prepare("SELECT id FROM shifts WHERE plan_id = ? AND shift_date = ? AND shift_code = ? AND status = 'OPEN' AND id != ?")
+          .get(plan.id, plan.plan_date, plan.shift_code, sh.id);
+        if (clash) throw conflict(`Shift OPEN #${clash.id} sudah ada di ${plan.plan_date} shift ${plan.shift_code}. Tutup shift tersebut dulu.`);
+      }
+      db.prepare('UPDATE shifts SET shift_date = ?, shift_code = ? WHERE id = ?').run(plan.plan_date, plan.shift_code, sh.id);
+      audit(db, user, { action: 'SYNC', entity: 'shifts', recordId: sh.id,
+        oldValue: { shift_date: sh.shift_date, shift_code: sh.shift_code },
+        newValue: { shift_date: plan.plan_date, shift_code: plan.shift_code },
+        reason: `Sinkron dari Nomor Produksi ${plan.plan_no}` });
+      changed += 1;
+    }
+    return changed;
+  };
+  const inTransaction = (fn) => {
+    db.exec('BEGIN');
+    try { const out = fn(); db.exec('COMMIT'); return out; } catch (err) { db.exec('ROLLBACK'); throw err; }
   };
 
   r.patch('/plans/:id', requireAuth, requirePerm('data.edit'), (req, res) => {
@@ -85,14 +108,25 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     const provided = Object.fromEntries(Object.entries(norm).filter(([k]) => req.body[k] !== undefined || (targetTouched && (k === 'target_bale' || k === 'target_kg'))));
     const merged = { ...plan, ...provided };
     if (req.body.plan_no !== undefined) merged.plan_no = checkPlanNo(req.body.plan_no, plan.id);
-    db.prepare(`UPDATE production_plans SET plan_no=?, plan_date=?, shift_code=?, work_order=?, product=?, target_bale=?, target_kg=?, target_trolley=?,
-      dryers=?, presses=?, sampling_rules=?, cake_interval_min=?, batch_sequence=?, notes=? WHERE id=?`).run(
-      merged.plan_no, merged.plan_date, merged.shift_code, merged.work_order, merged.product, merged.target_bale, merged.target_kg, merged.target_trolley,
-      JSON.stringify(merged.dryers), JSON.stringify(merged.presses), JSON.stringify(merged.sampling_rules),
-      merged.cake_interval_min, JSON.stringify(merged.batch_sequence), merged.notes, plan.id);
+    const synced = inTransaction(() => {
+      db.prepare(`UPDATE production_plans SET plan_no=?, plan_date=?, shift_code=?, work_order=?, product=?, target_bale=?, target_kg=?, target_trolley=?,
+        dryers=?, presses=?, sampling_rules=?, cake_interval_min=?, batch_sequence=?, notes=? WHERE id=?`).run(
+        merged.plan_no, merged.plan_date, merged.shift_code, merged.work_order, merged.product, merged.target_bale, merged.target_kg, merged.target_trolley,
+        JSON.stringify(merged.dryers), JSON.stringify(merged.presses), JSON.stringify(merged.sampling_rules),
+        merged.cake_interval_min, JSON.stringify(merged.batch_sequence), merged.notes, plan.id);
+      return syncShiftsToPlan({ ...merged, id: plan.id }, req.user);
+    });
     const after = loadPlan(plan.id);
     audit(db, req.user, { action: 'UPDATE', entity: 'production_plans', recordId: plan.id, oldValue: plan, newValue: after });
-    res.json({ item: after });
+    res.json({ item: after, synced_shifts: synced });
+  });
+
+  // Sinkron ulang: merapikan shift yang tanggal/shiftnya tidak sesuai plan.
+  r.post('/plans/:id/sync-shifts', requireAuth, requirePerm('data.edit'), (req, res) => {
+    const plan = loadPlan(Number(req.params.id));
+    assertEditable(plan);
+    const synced = inTransaction(() => syncShiftsToPlan(plan, req.user));
+    res.json({ item: loadPlan(plan.id), synced_shifts: synced });
   });
 
   // ---------- Periode / tutup buku ----------
@@ -196,7 +230,7 @@ function buildRouter(db, { requireAuth, requirePerm }) {
     res.json({ plan_id: plan.id, plan_no: plan.plan_no, items });
   });
 
-  // ---------- Hard delete Nomor Produksi (hanya jika belum ada data produksi; tetap bisa diedit) ----------
+  // ---------- Hard delete Nomor Produksi (hanya jika belum ada data produksi) ----------
   r.delete('/plans/:id', requireAuth, requirePerm('hard.delete'), (req, res) => {
     const plan = loadPlan(Number(req.params.id));
     if (plan.status === 'CLOSED' || plan.status === 'SUPERSEDED') throw conflict(`Nomor Produksi berstatus ${plan.status} dan tidak dapat dihapus`);
@@ -356,7 +390,10 @@ function buildRouter(db, { requireAuth, requirePerm }) {
   r.post('/shifts', requireAuth, requirePerm('shift.write'), (req, res) => {
     const plan = loadPlan(Number(requireNumber(req.body || {}, 'plan_id', { integer: true, min: 1 })));
     if (plan.status !== 'ACTIVE') throw conflict('Shift hanya dapat dibuka untuk plan ACTIVE');
-    const shiftDate = req.body.shift_date ? String(req.body.shift_date) : plan.plan_date;
+    if (req.body.shift_date && String(req.body.shift_date) !== plan.plan_date) {
+      throw badRequest(`Tanggal shift mengikuti tanggal Nomor Produksi (${plan.plan_date}). Ubah tanggal Nomor Produksi jika memang salah.`);
+    }
+    const shiftDate = plan.plan_date;
     const shiftCode = plan.shift_code;
     const exists = db.prepare("SELECT id FROM shifts WHERE plan_id = ? AND shift_date = ? AND shift_code = ? AND status = 'OPEN'").get(plan.id, shiftDate, shiftCode);
     if (exists) throw conflict('Shift yang sama sudah OPEN');
