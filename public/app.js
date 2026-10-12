@@ -34,9 +34,13 @@
     const ct = res.headers.get('content-type') || '';
     const data = ct.includes('application/json') ? await res.json() : null;
     if (res.status === 401 && S.token && !url.startsWith('/auth/login')) {
-      S.token = null; localStorage.removeItem('pms_token'); S.me = null;
-      flash('err', 'Sesi berakhir. Silakan login ulang.');
-      return render();
+      // Token tidak valid (sesi berakhir/diganti). Kembali ke login; pesan hanya jika sebelumnya sudah login.
+      const wasLoggedIn = !!S.me;
+      S.token = null; S.me = null; S.plans = []; localStorage.removeItem('pms_token');
+      if (wasLoggedIn) S.flash = { kind: 'err', text: 'Sesi berakhir. Silakan login ulang.' };
+      const e = new Error('Sesi tidak valid');
+      e.status = 401;
+      throw e;
     }
     if (!res.ok) {
       const detail = data && data.details ? ' – ' + JSON.stringify(data.details) : '';
@@ -123,6 +127,7 @@
       if (!S.me) {
         try { S.me = (await api('GET', '/me')).user; } catch (e) { S.token = null; localStorage.removeItem('pms_token'); app.innerHTML = loginView(); return; }
       }
+      if (!S.me) { app.innerHTML = loginView(); return; }
       try { S.plans = (await api('GET', '/plans')).items; } catch (e) { S.plans = []; }
       if (!S.planId) {
         const active = S.plans.find((p) => p.status === 'ACTIVE') || S.plans[0];
@@ -134,6 +139,7 @@
       app.innerHTML = shell(body);
       S.flash = null;
     } catch (e) {
+      if (e.status === 401 || !S.token) { app.innerHTML = loginView(); return; }
       app.innerHTML = shell(`<div class="msg err">${esc(e.message)}</div>`);
     }
   }
@@ -205,6 +211,7 @@
     try {
       const body = readForm(form);
       if (name === 'login') {
+        S.flash = null;
         const res = await api('POST', '/auth/login', body);
         S.token = res.token; localStorage.setItem('pms_token', res.token);
         S.me = null; S.plans = []; S.planId = null;
