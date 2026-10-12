@@ -1,0 +1,19 @@
+{
+  "name": "pms-produksi-kering",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production Management System (Produksi Kering) PT Potensi Bumi Sakti (MVP sesuai dokumen Kebutuhan Developer Rev.02)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "backup": "node scripts/backup.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "express": "^4.22.3"
+  }
+}
