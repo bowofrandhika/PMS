@@ -61,7 +61,7 @@ server/
     reports.js        dashboard, OEE, konsumsi/energi, koreksi, laporan
 public/
   index.html, app.js, styles.css   SPA vanilla
-  logo.svg                         logo PENGGANTI (ganti dengan logo resmi)
+  logo.svg                         logo resmi PBS (LOGO_-_PBS.svg, metadata C2PA dibuang)
 test/api.test.js      test integrasi (node:test)
 scripts/backup.js     backup database
 docs/ASSUMPTIONS.md   asumsi, open items, gap
@@ -69,7 +69,7 @@ docs/ASSUMPTIONS.md   asumsi, open items, gap
 
 ## Mengganti logo
 
-Logo resmi "LOGO - PBS.png" belum tersedia di repositori. Simpan logo resmi sebagai `public/logo.svg` (atau ubah `src` di `public/index.html`, `public/app.js`, dan `server/routes/reports.js` yang memakai `/logo.svg`).
+Logo resmi PBS dipakai sebagai `public/logo.svg` (sumber: `LOGO_-_PBS.svg` dari folder PMS di Drive). Untuk mengganti, timpa `public/logo.svg` dengan SVG baru (atau ubah `src` di `public/index.html`, `public/app.js`, dan `server/routes/reports.js` bila memakai nama/format lain).
 
 ## Catatan keamanan
 

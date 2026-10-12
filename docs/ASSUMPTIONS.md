@@ -87,6 +87,6 @@ Mengikuti bagian 2.1. Hal di bagian 2.2 **tidak** dibuat sebagai form rutin:
 5. **Aturan QC untuk Bale OK** (Good hanya setelah QC Release) belum dimodelkan penuh. Saat ini OK dihitung Good dan Hold/Reject hanya Good setelah QC Release.
 6. **Lab/QC detail, treatment Hold, integrasi alat, Furnace, Wet Production** tidak dibangun (Tahap 4).
 7. **Backup/restore** tersedia sebagai skrip (`npm run backup`), tetapi belum ada prosedur restore otomatis. Restore dilakukan manual dengan server dihentikan.
-8. **Logo**: `public/logo.svg` adalah **logo pengganti buatan**. Logo asli "LOGO - PBS.png" tidak bisa dipindahkan ke sandbox. Ganti file `public/logo.svg` dengan logo resmi (SVG, atau ubah referensi ke PNG).
+8. **Logo**: `public/logo.svg` adalah logo resmi PBS dari `LOGO_-_PBS.svg` (folder PMS di Drive), dengan metadata C2PA dibuang. Belum diverifikasi secara visual (sandbox tidak punya renderer SVG); konfirmasi tampilannya di browser. PNG asli (`LOGO - PBS.png`, 2,1 MB) tidak dipakai.
 9. **Pengujian UI**: frontend diperiksa sintaksnya dan endpoint-nya diuji lewat test integrasi, tetapi belum diuji di browser sungguhan. UAT (28 skenario) belum dijalankan.
 10. **Tidak ada edit PATCH untuk plan DRAFT** di UI (endpoint `PATCH /plans/:id` tersedia).
