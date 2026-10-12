@@ -1,0 +1,14 @@
+node_modules
+dist
+dist-ssr
+.vite
+*.local
+.DS_Store
+npm-debug.log*
+yarn-error.log*
+.env
+.env.*
+!.env.example
+.idea
+.vscode/*
+!.vscode/extensions.json
